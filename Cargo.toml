@@ -1,0 +1,28 @@
+[package]
+name = "oxandi"
+version = "0.1.0"
+authors = ["Forest Sharp <forestcollinssharp@gmail.com>"]
+edition = "2018"
+
+[features]
+default = ["rendy"]
+metal = ["rendy/metal"]
+dx12 = ["rendy/dx12"]
+vulkan = ["rendy/vulkan"]
+empty = ["rendy/empty"]
+
+[dependencies]
+env_logger = "0.6"
+nalgebra-glm = "0.4"
+log = "0.4"
+lazy_static = "1.0"
+failure = "0.1"
+rendy-shader = "0.2.0"
+
+rayon = "1.1.0"
+specs = "0.15.0"
+
+[dependencies.rendy]
+optional = true
+version = "0.2"
+features = ["texture-image", "shader-compiler", "spirv-reflection"]
