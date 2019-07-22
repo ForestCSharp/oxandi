@@ -12,14 +12,12 @@ vulkan = ["rendy/vulkan"]
 empty = ["rendy/empty"]
 
 [dependencies]
+log = "0.4"
 env_logger = "0.6"
 nalgebra-glm = "0.4"
-log = "0.4"
 lazy_static = "1.0"
 failure = "0.1"
 rendy-shader = "0.2.0"
-
-rayon = "1.1.0"
 specs = "0.15.0"
 
 [dependencies.rendy]
