@@ -17,10 +17,11 @@ env_logger = "0.6"
 nalgebra-glm = "0.4"
 lazy_static = "1.0"
 failure = "0.1"
-rendy-shader = "0.2.0"
 specs = "0.15.0"
+specs-derive = "0.4.0"
+rhai = "0.9.1"
 
 [dependencies.rendy]
 optional = true
-version = "0.2"
+version = "0.4"
 features = ["texture-image", "shader-compiler", "spirv-reflection"]

@@ -9,12 +9,11 @@ use rendy::{
     graph::{
         present::PresentNode, render::*, Graph, GraphBuilder, GraphContext, NodeBuffer, NodeImage,
     },
-    hal,
-    hal::device::Device,
+    hal::{self, Device as _, PhysicalDevice as _},
     memory::Dynamic,
     mesh::PosColor,
     resource::{Buffer, BufferInfo, DescriptorSet, DescriptorSetLayout, Escape, Handle},
-    shader::{ShaderKind, SourceLanguage, StaticShaderInfo},
+    shader::{ShaderKind, SourceLanguage, StaticShaderInfo, ShaderSet},
     wsi::winit::{EventsLoop, WindowBuilder, dpi},
 };
 
@@ -22,6 +21,8 @@ extern crate nalgebra_glm as glm;
 
 extern crate specs;
 use specs::prelude::*;
+#[macro_use]
+extern crate specs_derive;
 
 use rendy::shader::SpirvReflection;
 
@@ -58,6 +59,11 @@ lazy_static::lazy_static! {
     static ref SHADER_REFLECTION: SpirvReflection = SHADERS.reflect().unwrap();
 }
 
+#[derive(Debug)]
+struct Scene<B: hal::Backend> {
+    phantom: std::marker::PhantomData<B>,
+}
+
 #[derive(Clone, Copy, Debug)]
 #[repr(C, align(16))]
 struct UniformData {
@@ -72,17 +78,13 @@ struct TriangleRenderPipelineDesc;
 #[derive(Debug)]
 struct TriangleRenderPipeline<B: hal::Backend> {
     vertex: Option<Escape<Buffer<B>>>,
-    set: Escape<DescriptorSet<B>>,
+    sets: Vec<Escape<DescriptorSet<B>>>,
     uniform_buffer: Escape<Buffer<B>>
 }
 
-/*TODO: the "T" is the aux struct, which you can use to access/pass in data to pipeline, 
-            aux is passed in when creating, running, disposing the graph 
-            Example Usage: when drawing, iterate over all meshes in aux struct */
-impl<B, T> SimpleGraphicsPipelineDesc<B, T> for TriangleRenderPipelineDesc
+impl<B> SimpleGraphicsPipelineDesc<B, Scene<B>> for TriangleRenderPipelineDesc
 where
     B: hal::Backend,
-    T: ?Sized,
 {
     type Pipeline = TriangleRenderPipeline<B>;
 
@@ -90,7 +92,11 @@ where
         None
     }
 
-    fn load_shader_set(&self, factory: &mut Factory<B>, _aux: &T) -> rendy_shader::ShaderSet<B> {
+    fn load_shader_set(
+        &self, 
+        factory: &mut Factory<B>, 
+        _scene : &Scene<B>
+    ) -> ShaderSet<B> {
         SHADERS.build(factory, Default::default()).unwrap()
     }
 
@@ -111,10 +117,10 @@ where
 
     fn build<'a>(
         self,
-        _ctx: &GraphContext<B>,
+        ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         _queue: QueueId,
-        _aux: &T,
+        _scene : &Scene<B>,
         buffers: Vec<NodeBuffer>,
         images: Vec<NodeImage>,
         set_layouts: &[Handle<DescriptorSetLayout<B>>],
@@ -123,43 +129,47 @@ where
         assert!(images.is_empty());
         assert!(set_layouts.len() > 0);
 
+        let frames_in_flight_count = ctx.frames_in_flight as u64;
+
         let uniform_size = std::mem::size_of::<UniformData>() as u64;
         let uniform_buffer = factory
             .create_buffer(
                 BufferInfo {
-                    size: uniform_size,
+                    size: uniform_size * frames_in_flight_count,
                     usage: hal::buffer::Usage::UNIFORM,
                 },
                 Dynamic,
             )
             .unwrap();
 
-        let set = unsafe {
-            let set = factory
-                .create_descriptor_set(set_layouts[0].clone())
-                .unwrap();
-            factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
-                set: set.raw(),
-                binding: 0,
-                array_offset: 0,
-                descriptors: Some(hal::pso::Descriptor::Buffer(
-                    uniform_buffer.raw(),
-                    None..None,
-                )),
-            }));
-            set
-        };
+        let mut sets = Vec::new();
+        for index in 0..frames_in_flight_count {
+            sets.push( unsafe {
+                let set = factory
+                    .create_descriptor_set(set_layouts[0].clone())
+                    .unwrap();
+                factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
+                    set: set.raw(),
+                    binding: 0,
+                    array_offset: 0,
+                    descriptors: Some(hal::pso::Descriptor::Buffer(
+                        uniform_buffer.raw(),
+                        Some(uniform_size * index) .. Some(uniform_size * (index + 1))
+                    )),
+                }));
+                set
+            });
+        }
 
-        Ok(TriangleRenderPipeline { vertex: None, set, uniform_buffer})
+        Ok(TriangleRenderPipeline { vertex: None, sets, uniform_buffer})
     }
 }
 
 static mut ROTATION : f32 = 0.0f32;
 
-impl<B, T> SimpleGraphicsPipeline<B, T> for TriangleRenderPipeline<B>
+impl<B> SimpleGraphicsPipeline<B, Scene<B>> for TriangleRenderPipeline<B>
 where
     B: hal::Backend,
-    T: ?Sized,
 {
     type Desc = TriangleRenderPipelineDesc;
 
@@ -168,8 +178,8 @@ where
         factory: &Factory<B>,
         _queue: QueueId,
         _set_layouts: &[Handle<DescriptorSetLayout<B>>],
-        _index: usize,
-        _aux: &T,
+        index: usize,
+        _scene : &Scene<B>,
     ) -> PrepareResult {
         if self.vertex.is_none() {
             let vbuf_size = SHADER_REFLECTION.attributes_range(..).unwrap().stride as u64 * 3;
@@ -210,12 +220,12 @@ where
             self.vertex = Some(vbuf);
         }
 
-        //Update Uniform Data
+        //Update Uniform Data (offset based on current frame in flight index)
         unsafe {
-            ROTATION = ROTATION + 0.05f32;
+            ROTATION = ROTATION + 0.01f32;
             factory.upload_visible_buffer(
                 &mut self.uniform_buffer,
-                0,
+                (std::mem::size_of::<UniformData>() * index) as u64, //access correct uni buffer
                 &[UniformData {
                     model_matrix : glm::rotate_z(&glm::Mat4::identity(), ROTATION),
                     view_matrix  : glm::Mat4::identity(),
@@ -227,52 +237,48 @@ where
         PrepareResult::DrawReuse
     }
 
+    //FCS Note: this is only called once per frame-in-flight, prepare called every frame
     fn draw(
         &mut self,
         layout: &B::PipelineLayout,
         mut encoder: RenderPassEncoder<'_, B>,
-        _index: usize,
-        _aux: &T,
+        index: usize,
+        _scene : &Scene<B>,
     ) {
-        encoder.bind_graphics_descriptor_sets(
-            layout,
-            0,
-            Some(self.set.raw()),
-            std::iter::empty(),
-        );
-        let vbuf = self.vertex.as_ref().unwrap();
-        encoder.bind_vertex_buffers(0, Some((vbuf.raw(), 0)));
-        encoder.draw(0..3, 0..1);
+        println!("Index: {}", index);
+        unsafe {
+            encoder.bind_graphics_descriptor_sets(
+                layout,
+                0,
+                Some(self.sets[index].raw()),
+                std::iter::empty(),
+            );
+            let vbuf = self.vertex.as_ref().unwrap();
+            encoder.bind_vertex_buffers(0, Some((vbuf.raw(), 0)));
+            encoder.draw(0..3, 0..1);
+        }
     }
 
-    fn dispose(self, _factory: &mut Factory<B>, _aux: &T) {}
+    fn dispose(self, _factory: &mut Factory<B>, _scene : &Scene<B>) {}
 }
 
 // A component contains data which is associated with an entity.
 
-#[derive(Debug)]
+#[derive(Debug, Component)]
 struct Vel {
     x : f32,
     y : f32,
 }
 
-impl Component for Vel {
-    type Storage = VecStorage<Self>;
-}
-
-#[derive(Debug)]
+#[derive(Debug, Component)]
 struct Pos {
     x: f32,
     y: f32,
 }
 
-impl Component for Pos {
-    type Storage = VecStorage<Self>;
-}
+struct MovementSystem;
 
-struct SysA;
-
-impl<'a> System<'a> for SysA {
+impl<'a> System<'a> for MovementSystem {
     // These are the resources required for execution.
     // You can also define a struct and `#[derive(SystemData)]`,
     // see the `full` example.
@@ -289,7 +295,7 @@ impl<'a> System<'a> for SysA {
             pos.x += vel.x * 0.05;
             pos.y += vel.y * 0.05;
 
-            println!("{}, {}", pos.x, pos.y);
+            //println!("{}, {}", pos.x, pos.y);
         });
     }
 }
@@ -299,6 +305,8 @@ fn main() {
     env_logger::Builder::from_default_env()
         .filter_module("triangle", log::LevelFilter::Trace)
         .init();
+
+    let mut scene = Scene { phantom : std::marker::PhantomData};
 
     let config: Config = Default::default();
 
@@ -316,7 +324,7 @@ fn main() {
 
     let surface = factory.create_surface(&window);
 
-    let mut graph_builder = GraphBuilder::<Backend, ()>::new();
+    let mut graph_builder = GraphBuilder::<Backend, Scene<Backend>>::new();
 
     let size = window
         .get_inner_size()
@@ -337,15 +345,20 @@ fn main() {
             .into_pass(),
     );
 
-    graph_builder.add_node(PresentNode::builder(&factory, surface, color).with_dependency(pass));
+    let present_builder = PresentNode::builder(&factory, surface, color).with_dependency(pass);
+
+    let frames_in_flight_count = present_builder.image_count();
+
+    graph_builder.add_node(present_builder);
 
     let mut graph = graph_builder
-        .build(&mut factory, &mut families, &mut ())
+        .with_frames_in_flight(frames_in_flight_count)
+        .build(&mut factory, &mut families, &mut scene)
         .unwrap();
 
     //Specs setup
     let mut specs_world = World::new();
-    let mut specs_dispatcher = DispatcherBuilder::new().with(SysA, "sys_a", &[]).build();
+    let mut specs_dispatcher = DispatcherBuilder::new().with(MovementSystem, "sys_a", &[]).build();
     specs_dispatcher.setup(&mut specs_world);
     specs_world.create_entity().with(Vel { x: 2.0, y: 2.0}).with(Pos { x: 0.0, y: 0.0}).build();
     specs_world.create_entity().with(Vel{ x: 4.0, y: 4.0}).with(Pos { x: 0.0, y: 0.0}).build();
@@ -374,10 +387,10 @@ fn main() {
         
         factory.maintain(&mut families);
         event_loop.poll_events(|_| ());
-        graph.run(&mut factory, &mut families, &mut ());
+        graph.run(&mut factory, &mut families, &mut scene);
     }
 
-    graph.dispose(&mut factory, &mut ());
+    graph.dispose(&mut factory, &mut scene);
 }
 
 #[cfg(not(any(feature = "dx12", feature = "metal", feature = "vulkan")))]
