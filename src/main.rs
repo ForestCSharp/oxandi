@@ -24,6 +24,9 @@ use specs::prelude::*;
 #[macro_use]
 extern crate specs_derive;
 
+extern crate rhai;
+use rhai::{RegisterFn, Scope};
+
 use rendy::shader::SpirvReflection;
 
 #[cfg(feature = "dx12")]
@@ -295,7 +298,7 @@ impl<'a> System<'a> for MovementSystem {
             pos.x += vel.x * 0.05;
             pos.y += vel.y * 0.05;
 
-            //println!("{}, {}", pos.x, pos.y);
+            println!("{}, {}", pos.x, pos.y);
         });
     }
 }
@@ -356,17 +359,46 @@ fn main() {
         .build(&mut factory, &mut families, &mut scene)
         .unwrap();
 
+    use std::sync::{Arc, Mutex};
+
     //Specs setup
-    let mut specs_world = World::new();
-    let mut specs_dispatcher = DispatcherBuilder::new().with(MovementSystem, "sys_a", &[]).build();
-    specs_dispatcher.setup(&mut specs_world);
-    specs_world.create_entity().with(Vel { x: 2.0, y: 2.0}).with(Pos { x: 0.0, y: 0.0}).build();
-    specs_world.create_entity().with(Vel{ x: 4.0, y: 4.0}).with(Pos { x: 0.0, y: 0.0}).build();
-    specs_world.create_entity().with(Vel{ x: 4.0, y: 4.0}).with(Pos { x: 0.0, y: 0.0}).build();
-    specs_world.create_entity().with(Pos { x: 0.0, y: 0.0}).build();
+    let specs_world = Arc::new(Mutex::new(World::new()));
+    
+    let specs_dispatcher = {
+        let mut dispatcher = DispatcherBuilder::new().with(MovementSystem, "sys_a", &[]).build();
+        //NOTE: has to be done before creating entities in world (seems problematic)
+        dispatcher.setup(&mut specs_world.lock().unwrap());
+        Arc::new(Mutex::new(dispatcher))
+    };
+
+    if let mut specs_world = specs_world.lock().unwrap() {
+        specs_world.create_entity().with(Vel { x: 2.0, y: 2.0}).with(Pos { x: 0.0, y: 0.0}).build();
+        specs_world.create_entity().with(Vel{ x: 4.0, y: 4.0}).with(Pos { x: 0.0, y: 0.0}).build();
+        specs_world.create_entity().with(Vel{ x: 4.0, y: 4.0}).with(Pos { x: 0.0, y: 0.0}).build();
+        specs_world.create_entity().with(Pos { x: 0.0, y: 0.0}).build();
+    }
+
+    fn add(x : i64, y : i64) -> i64 {
+        x + y
+    }
+
+    fn dispatch_world(dispatcher: Arc<Mutex<specs::Dispatcher>>, world : Arc<Mutex<specs::World>>) {
+        dispatcher.lock().unwrap().dispatch_par(&world.lock().unwrap());
+    }
+
+    let mut rhai_engine = rhai::Engine::new();
+    rhai_engine.register_fn("add", add);
+    rhai_engine.register_fn("dispatch_world", dispatch_world);
+    rhai_engine.register_type::<Arc<Mutex<specs::Dispatcher>>>();
+    rhai_engine.register_type::<Arc<Mutex<specs::World>>>();
+   
+    let mut scope = Scope::new();
+    scope.push(("dispatcher".to_string(), Box::new(specs_dispatcher.clone())));
+    scope.push(("world". to_string(), Box::new(specs_world.clone())));
 
     loop {
-        specs_dispatcher.dispatch_par(&specs_world);
+        //Execute Rhai Script
+        rhai_engine.eval_with_scope::<()>(&mut scope, "dispatch_world(dispatcher, world)").expect("Failed to run rhai code");
 
         let mut should_close = false;
         event_loop.poll_events(|event| {
