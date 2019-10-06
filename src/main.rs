@@ -265,43 +265,9 @@ where
     fn dispose(self, _factory: &mut Factory<B>, _scene : &Scene<B>) {}
 }
 
-// A component contains data which is associated with an entity.
+mod specs_systems;
+use specs_systems::spatial::{MovementSystem, Vel, Pos};
 
-#[derive(Debug, Component)]
-struct Vel {
-    x : f32,
-    y : f32,
-}
-
-#[derive(Debug, Component)]
-struct Pos {
-    x: f32,
-    y: f32,
-}
-
-struct MovementSystem;
-
-impl<'a> System<'a> for MovementSystem {
-    // These are the resources required for execution.
-    // You can also define a struct and `#[derive(SystemData)]`,
-    // see the `full` example.
-    type SystemData = (WriteStorage<'a, Pos>, ReadStorage<'a, Vel>);
-
-    fn run(&mut self, (mut pos, vel): Self::SystemData) {
-        // The `.join()` combines multiple components,
-        // so we only access those entities which have
-        // both of them.
-        // You could also use `par_join()` to get a rayon `ParallelIterator`.
-        (&vel, &mut pos)
-        .par_join()
-        .for_each(|(vel, pos)| {
-            pos.x += vel.x * 0.05;
-            pos.y += vel.y * 0.05;
-
-            println!("{}, {}", pos.x, pos.y);
-        });
-    }
-}
 
 #[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
 fn main() {
@@ -372,10 +338,10 @@ fn main() {
     };
 
     if let mut specs_world = specs_world.lock().unwrap() {
-        specs_world.create_entity().with(Vel { x: 2.0, y: 2.0}).with(Pos { x: 0.0, y: 0.0}).build();
-        specs_world.create_entity().with(Vel{ x: 4.0, y: 4.0}).with(Pos { x: 0.0, y: 0.0}).build();
-        specs_world.create_entity().with(Vel{ x: 4.0, y: 4.0}).with(Pos { x: 0.0, y: 0.0}).build();
-        specs_world.create_entity().with(Pos { x: 0.0, y: 0.0}).build();
+        specs_world.create_entity().with(Vel { value : glm::vec3(2.0, 1.0, 3.0)}).with(Pos { value : glm::Vec3::new(1.0, 2.0, 3.0)}).build();
+        specs_world.create_entity().with(Vel { value : glm::Vec3::new(3.0, 2.0, 1.0)}).with(Pos { value : glm::Vec3::new(2.0, 4.0, 3.0)}).build();
+        specs_world.create_entity().with(Vel { value : glm::Vec3::new(1.0, 3.0, 2.0)}).with(Pos { value : glm::Vec3::new(3.0, 2.0, 5.0)}).build();
+        specs_world.create_entity().with(Pos { value : glm::Vec3::new(3.0, 2.0, 5.0)}).build();
     }
 
     fn add(x : i64, y : i64) -> i64 {
