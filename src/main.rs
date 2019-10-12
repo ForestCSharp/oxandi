@@ -3,17 +3,23 @@
     allow(unused)
 )]
 
+use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+
+#[macro_use]
+extern crate derive_deref;
+
 use rendy::{
-    command::{Families, QueueId, RenderPassEncoder},
+    command::{QueueId, RenderPassEncoder},
     factory::{Config, Factory},
     graph::{
-        present::PresentNode, render::*, Graph, GraphBuilder, GraphContext, NodeBuffer, NodeImage,
+        present::PresentNode, render::*, GraphBuilder, GraphContext, NodeBuffer, NodeImage,
     },
-    hal::{self, Device as _, PhysicalDevice as _},
+    hal::{self, Device as _},
     memory::Dynamic,
     mesh::PosColor,
     resource::{Buffer, BufferInfo, DescriptorSet, DescriptorSetLayout, Escape, Handle},
-    shader::{ShaderKind, SourceLanguage, StaticShaderInfo, ShaderSet},
+    shader::{ShaderKind, SourceLanguage, PathBufShaderInfo, ShaderSet},
     wsi::winit::{EventsLoop, WindowBuilder, dpi},
 };
 
@@ -39,15 +45,15 @@ type Backend = rendy::metal::Backend;
 type Backend = rendy::vulkan::Backend;
 
 lazy_static::lazy_static! {
-    static ref VERTEX: StaticShaderInfo = StaticShaderInfo::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/data/shaders/triangle.vert"),
+    static ref VERTEX: PathBufShaderInfo = PathBufShaderInfo::new(
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/shaders/triangle.vert")),
         ShaderKind::Vertex,
         SourceLanguage::GLSL,
         "main",
     );
 
-    static ref FRAGMENT: StaticShaderInfo = StaticShaderInfo::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/data/shaders/triangle.frag"),
+    static ref FRAGMENT: PathBufShaderInfo = PathBufShaderInfo::new(
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/shaders/triangle.frag")),
         ShaderKind::Fragment,
         SourceLanguage::GLSL,
         "main",
@@ -62,8 +68,8 @@ lazy_static::lazy_static! {
     static ref SHADER_REFLECTION: SpirvReflection = SHADERS.reflect().unwrap();
 }
 
-#[derive(Debug)]
 struct Scene<B: hal::Backend> {
+    test_model : GltfModel,
     phantom: std::marker::PhantomData<B>,
 }
 
@@ -266,8 +272,10 @@ where
 }
 
 mod specs_systems;
-use specs_systems::spatial::{MovementSystem, Vel, Pos};
+use specs_systems::{common::DeltaTime, spatial::{Position, Velocity, Acceleration, VelocitySystem, AccelerationSystem, PrinterSystem}};
 
+mod gltf_loader;
+use gltf_loader::*;
 
 #[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
 fn main() {
@@ -275,7 +283,12 @@ fn main() {
         .filter_module("triangle", log::LevelFilter::Trace)
         .init();
 
-    let mut scene = Scene { phantom : std::marker::PhantomData};
+    let gltf_model = GltfModel::new("data/models/Running.glb");
+
+    let mut scene = Scene {
+        test_model : gltf_model,
+        phantom : std::marker::PhantomData,
+    };
 
     let config: Config = Default::default();
 
@@ -325,23 +338,33 @@ fn main() {
         .build(&mut factory, &mut families, &mut scene)
         .unwrap();
 
-    use std::sync::{Arc, Mutex};
-
     //Specs setup
     let specs_world = Arc::new(Mutex::new(World::new()));
     
     let specs_dispatcher = {
-        let mut dispatcher = DispatcherBuilder::new().with(MovementSystem, "sys_a", &[]).build();
+        let mut dispatcher = DispatcherBuilder::new()
+            .with(VelocitySystem, "velocity_system", &[])
+            .with(AccelerationSystem, "acceleration_system", &["velocity_system"])
+            .with(PrinterSystem, "printer_system", &[])
+        .build();
         //NOTE: has to be done before creating entities in world (seems problematic)
         dispatcher.setup(&mut specs_world.lock().unwrap());
         Arc::new(Mutex::new(dispatcher))
     };
 
-    if let mut specs_world = specs_world.lock().unwrap() {
-        specs_world.create_entity().with(Vel { value : glm::vec3(2.0, 1.0, 3.0)}).with(Pos { value : glm::Vec3::new(1.0, 2.0, 3.0)}).build();
-        specs_world.create_entity().with(Vel { value : glm::Vec3::new(3.0, 2.0, 1.0)}).with(Pos { value : glm::Vec3::new(2.0, 4.0, 3.0)}).build();
-        specs_world.create_entity().with(Vel { value : glm::Vec3::new(1.0, 3.0, 2.0)}).with(Pos { value : glm::Vec3::new(3.0, 2.0, 5.0)}).build();
-        specs_world.create_entity().with(Pos { value : glm::Vec3::new(3.0, 2.0, 5.0)}).build();
+    {
+        let mut specs_world = specs_world.lock().unwrap();
+        specs_world.insert(DeltaTime(0.05)); //add a resource
+        specs_world.create_entity().with(Velocity(glm::vec3(2.0, 1.0, 3.0))).with(Position(glm::Vec3::new(1.0, 2.0, 3.0))).build();
+        specs_world.create_entity().with(Velocity(glm::vec3(200.0, 100.0, 300.0))).with(Position(glm::Vec3::new(1.0, 2.0, 3.0))).build();
+        
+        specs_world.create_entity()
+            .with(Velocity(glm::vec3(2.0, 1.0, 3.0)))
+            .with(Position(glm::Vec3::new(1.0, 2.0, 3.0)))
+            .with(Acceleration(glm::Vec3::new(2.0, 1.0, 2.0)))
+            .build();
+
+        specs_world.create_entity().with(Position(glm::Vec3::new(1.0, 2.0, 3.0))).build();
     }
 
     fn add(x : i64, y : i64) -> i64 {
@@ -363,6 +386,10 @@ fn main() {
     scope.push(("world". to_string(), Box::new(specs_world.clone())));
 
     loop {
+
+        //TODO: Actually compute delta time
+        *specs_world.lock().unwrap().write_resource::<DeltaTime>() = DeltaTime(0.04);
+
         //Execute Rhai Script
         rhai_engine.eval_with_scope::<()>(&mut scope, "dispatch_world(dispatcher, world)").expect("Failed to run rhai code");
 
@@ -383,6 +410,7 @@ fn main() {
 
         if should_close { break; }
         
+        //TODO: Wrap in render system
         factory.maintain(&mut families);
         event_loop.poll_events(|_| ());
         graph.run(&mut factory, &mut families, &mut scene);
@@ -395,3 +423,7 @@ fn main() {
 fn main() {
     panic!("Specify feature: { dx12, metal, vulkan }");
 }
+
+// TODO: 1. Crate to convert GLTF Animation data to a fast-readable format (bake matrices at each bone)
+// TODO: 2. Create a RenderComponent
+// TODO: 3. Render System at end that renders output

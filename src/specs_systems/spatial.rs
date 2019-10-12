@@ -1,62 +1,70 @@
 use specs::prelude::*;
-use std::ops::{Deref, DerefMut};
 
-#[derive(Debug, Component)]
-pub struct Vel {
-    pub value : glm::Vec3,
-}
+use crate::DeltaTime;
 
-impl Deref for Vel {
-    type Target = glm::Vec3;
-    fn deref(&self) -> &Self::Target {
-        &self.value
+#[derive(Debug, Component, Deref, DerefMut)]
+pub struct Position(pub glm::Vec3);
+
+#[derive(Debug, Component, Deref, DerefMut)]
+pub struct Velocity(pub glm::Vec3);
+
+#[derive(Debug, Component, Deref, DerefMut)]
+pub struct Acceleration(pub glm::Vec3);
+
+//TODO: automatic numeric operators via some proc macro (see newtype_derive (created before proc macros so a bit odd))
+
+#[derive(Component, Default)]
+pub struct Printer(String);
+
+pub struct PrinterSystem;
+
+impl<'a> System<'a> for PrinterSystem {
+    type SystemData = (ReadStorage<'a,Printer>);
+
+    fn run(&mut self, (printers) : Self::SystemData) {
+        (&printers)
+        .join()
+        .for_each(|printer| {
+            println!("{}", printer.0);
+        });
     }
 }
 
-impl DerefMut for Vel {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.value
-    }
-}
+pub struct VelocitySystem;
 
-#[derive(Debug, Component)]
-pub struct Pos {
-    pub value : glm::Vec3,
-}
+impl<'a> System<'a> for VelocitySystem {
 
-impl Deref for Pos {
-    type Target = glm::Vec3;
-    fn deref(&self) -> &Self::Target {
-        &self.value
-    }
-}
+    type SystemData = (Read<'a, DeltaTime>, WriteStorage<'a, Position>, ReadStorage<'a, Velocity>, Entities<'a>, WriteStorage<'a, Printer>);
 
-impl DerefMut for Pos {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.value
-    }
-}
+    fn run(&mut self, (dt, mut positions, velocities, entities, mut printers): Self::SystemData) {
+ 
+        //Testing inserting entities
+        let new_entity = entities.create();
+        printers.insert(new_entity, Printer(format!("printer: {}", printers.count())));
 
-pub struct MovementSystem;
-
-impl<'a> System<'a> for MovementSystem {
-    // These are the resources required for execution.
-    // You can also define a struct and `#[derive(SystemData)]`,
-    // see the `full` example.
-    type SystemData = (WriteStorage<'a, Pos>, ReadStorage<'a, Vel>);
-
-    fn run(&mut self, (mut pos, vel): Self::SystemData) {
-        // The `.join()` combines multiple components,
-        // so we only access those entities which have
-        // both of them.
-        // You could also use `par_join()` to get a rayon `ParallelIterator`.
-        (&vel, &mut pos)
+        (&velocities, &mut positions)
         .par_join()
         .for_each(|(vel, pos)| {
-            pos.x += vel.x * 0.05;
-            pos.y += vel.y * 0.05;
+            pos.0 += vel.0 * dt.0;
 
-            println!("{}, {}", pos.x, pos.y);
+            println!("New Pos: {} {} {}", pos.x, pos.y, pos.z);
+        });
+    }
+}
+
+pub struct AccelerationSystem;
+
+impl<'a> System<'a> for AccelerationSystem {
+
+    type SystemData = (Read<'a, DeltaTime>, WriteStorage<'a, Velocity>, ReadStorage<'a, Acceleration>);
+
+    fn run(&mut self, (dt, mut vel, acc): Self::SystemData) {
+        (&mut vel, &acc)
+        .par_join()
+        .for_each(|(vel, acc)| {
+            vel.0 += acc.0 * dt.0;
+
+            println!("New Vel: {} {} {}", vel.x, vel.y, vel.z);
         });
     }
 }
