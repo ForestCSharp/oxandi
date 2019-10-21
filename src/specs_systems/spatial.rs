@@ -6,65 +6,59 @@ use crate::DeltaTime;
 pub struct Position(pub glm::Vec3);
 
 #[derive(Debug, Component, Deref, DerefMut)]
+pub struct Rotation(pub glm::Quat);
+
+#[derive(Debug, Component, Deref, DerefMut)]
 pub struct Velocity(pub glm::Vec3);
 
 #[derive(Debug, Component, Deref, DerefMut)]
 pub struct Acceleration(pub glm::Vec3);
 
-//TODO: automatic numeric operators via some proc macro (see newtype_derive (created before proc macros so a bit odd))
+#[derive(Debug, Component, Deref, DerefMut)]
+pub struct Drag(pub f32);
 
-#[derive(Component, Default)]
-pub struct Printer(String);
+pub struct UpdatePositionSystem;
 
-pub struct PrinterSystem;
+impl<'a> System<'a> for UpdatePositionSystem {
 
-impl<'a> System<'a> for PrinterSystem {
-    type SystemData = (ReadStorage<'a,Printer>);
+    type SystemData = (Read<'a, DeltaTime>, WriteStorage<'a, Position>, ReadStorage<'a, Velocity>, Entities<'a>);
 
-    fn run(&mut self, (printers) : Self::SystemData) {
-        (&printers)
-        .join()
-        .for_each(|printer| {
-            println!("{}", printer.0);
-        });
-    }
-}
-
-pub struct VelocitySystem;
-
-impl<'a> System<'a> for VelocitySystem {
-
-    type SystemData = (Read<'a, DeltaTime>, WriteStorage<'a, Position>, ReadStorage<'a, Velocity>, Entities<'a>, WriteStorage<'a, Printer>);
-
-    fn run(&mut self, (dt, mut positions, velocities, entities, mut printers): Self::SystemData) {
+    fn run(&mut self, (dt, mut positions, velocities, entities): Self::SystemData) {
  
         //Testing inserting entities
-        let new_entity = entities.create();
-        printers.insert(new_entity, Printer(format!("printer: {}", printers.count())));
+        // let new_entity = entities.create();
+        // positions.insert(new_entity, positions(glm::vec3(0.,0.,0.))));
 
         (&velocities, &mut positions)
         .par_join()
         .for_each(|(vel, pos)| {
             pos.0 += vel.0 * dt.0;
-
-            println!("New Pos: {} {} {}", pos.x, pos.y, pos.z);
         });
     }
 }
 
-pub struct AccelerationSystem;
+pub struct UpdateVelocitySystem;
 
-impl<'a> System<'a> for AccelerationSystem {
+//TODO: Separate systems for Accel and Drag? so we don't require both?
+impl<'a> System<'a> for UpdateVelocitySystem {
 
-    type SystemData = (Read<'a, DeltaTime>, WriteStorage<'a, Velocity>, ReadStorage<'a, Acceleration>);
+    type SystemData = ( Read<'a, DeltaTime>, 
+                        WriteStorage<'a, Velocity>, 
+                        ReadStorage<'a, Acceleration>,
+                        ReadStorage<'a, Drag>);
 
-    fn run(&mut self, (dt, mut vel, acc): Self::SystemData) {
-        (&mut vel, &acc)
-        .par_join()
-        .for_each(|(vel, acc)| {
+    fn run(&mut self, (dt, mut vel, acc, drag): Self::SystemData) {    
+        for (vel, acc) in (&mut vel, &acc).join() {
             vel.0 += acc.0 * dt.0;
+        }
 
-            println!("New Vel: {} {} {}", vel.x, vel.y, vel.z);
-        });
+        //drag causes velocity to approach zero from either direction (pos/neg velocity values)
+        for (vel, acc, drag) in (&mut vel, &acc, &drag).join() {
+            let new_abs_vel = glm::clamp(&(vel.0.abs() - glm::vec3(drag.0, drag.0, drag.0) * dt.0), 0.0, std::f32::MAX);
+
+            vel.x = new_abs_vel.x.copysign(vel.x);
+            vel.y = new_abs_vel.y.copysign(vel.y);
+            vel.z = new_abs_vel.z.copysign(vel.z);
+        }
     }
 }

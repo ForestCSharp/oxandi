@@ -3,8 +3,9 @@
     allow(unused)
 )]
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::path::PathBuf;
+use std::time::{Instant};
 
 #[macro_use]
 extern crate derive_deref;
@@ -20,7 +21,7 @@ use rendy::{
     mesh::PosColor,
     resource::{Buffer, BufferInfo, DescriptorSet, DescriptorSetLayout, Escape, Handle},
     shader::{ShaderKind, SourceLanguage, PathBufShaderInfo, ShaderSet},
-    wsi::winit::{EventsLoop, WindowBuilder, dpi},
+    wsi::winit::{EventsLoop, WindowBuilder, dpi, VirtualKeyCode},
 };
 
 extern crate nalgebra_glm as glm;
@@ -36,13 +37,13 @@ use rhai::{RegisterFn, Scope};
 use rendy::shader::SpirvReflection;
 
 #[cfg(feature = "dx12")]
-type Backend = rendy::dx12::Backend;
+pub type Backend = rendy::dx12::Backend;
 
 #[cfg(feature = "metal")]
-type Backend = rendy::metal::Backend;
+pub type Backend = rendy::metal::Backend;
 
 #[cfg(feature = "vulkan")]
-type Backend = rendy::vulkan::Backend;
+pub type Backend = rendy::vulkan::Backend;
 
 lazy_static::lazy_static! {
     static ref VERTEX: PathBufShaderInfo = PathBufShaderInfo::new(
@@ -68,9 +69,29 @@ lazy_static::lazy_static! {
     static ref SHADER_REFLECTION: SpirvReflection = SHADERS.reflect().unwrap();
 }
 
-struct Scene<B: hal::Backend> {
-    test_model : GltfModel,
-    phantom: std::marker::PhantomData<B>,
+static WIDTH : f64 = 1280.0;
+static HEIGHT : f64 = 720.0;
+
+pub struct CameraRenderData {
+    pub position : glm::Vec3,
+    pub target   : glm::Vec3,
+    pub up       : glm::Vec3,
+}
+
+impl CameraRenderData {
+    fn new() -> CameraRenderData {
+        CameraRenderData {
+            position : glm::vec3(0., 0., 1.),
+            target   : glm::vec3(0., 0., 0.),
+            up       : glm::vec3(0., 1., 0.),
+        }
+    }
+}
+
+pub struct Scene<B: hal::Backend> {
+    pub test_model : GltfModel,
+    pub camera_data : CameraRenderData,
+    pub phantom: std::marker::PhantomData<B>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -82,20 +103,20 @@ struct UniformData {
 }
 
 #[derive(Debug, Default)]
-struct TriangleRenderPipelineDesc;
+struct BasicRenderPipelineDesc;
 
 #[derive(Debug)]
-struct TriangleRenderPipeline<B: hal::Backend> {
-    vertex: Option<Escape<Buffer<B>>>,
+struct BasicRenderPipeline<B: hal::Backend> {
+    mesh: Option<(Escape<Buffer<B>>, Escape<Buffer<B>>)>,
     sets: Vec<Escape<DescriptorSet<B>>>,
     uniform_buffer: Escape<Buffer<B>>
 }
 
-impl<B> SimpleGraphicsPipelineDesc<B, Scene<B>> for TriangleRenderPipelineDesc
+impl<B> SimpleGraphicsPipelineDesc<B, Scene<B>> for BasicRenderPipelineDesc
 where
     B: hal::Backend,
 {
-    type Pipeline = TriangleRenderPipeline<B>;
+    type Pipeline = BasicRenderPipeline<B>;
 
     fn depth_stencil(&self) -> Option<hal::pso::DepthStencilDesc> {
         None
@@ -133,7 +154,7 @@ where
         buffers: Vec<NodeBuffer>,
         images: Vec<NodeImage>,
         set_layouts: &[Handle<DescriptorSetLayout<B>>],
-    ) -> Result<TriangleRenderPipeline<B>, failure::Error> {
+    ) -> Result<BasicRenderPipeline<B>, failure::Error> {
         assert!(buffers.is_empty());
         assert!(images.is_empty());
         assert!(set_layouts.len() > 0);
@@ -170,17 +191,17 @@ where
             });
         }
 
-        Ok(TriangleRenderPipeline { vertex: None, sets, uniform_buffer})
+        Ok(BasicRenderPipeline { mesh: None, sets, uniform_buffer})
     }
 }
 
 static mut ROTATION : f32 = 0.0f32;
 
-impl<B> SimpleGraphicsPipeline<B, Scene<B>> for TriangleRenderPipeline<B>
+impl<B> SimpleGraphicsPipeline<B, Scene<B>> for BasicRenderPipeline<B>
 where
     B: hal::Backend,
 {
-    type Desc = TriangleRenderPipelineDesc;
+    type Desc = BasicRenderPipelineDesc;
 
     fn prepare(
         &mut self,
@@ -188,10 +209,17 @@ where
         _queue: QueueId,
         _set_layouts: &[Handle<DescriptorSetLayout<B>>],
         index: usize,
-        _scene : &Scene<B>,
+        scene : &Scene<B>,
     ) -> PrepareResult {
-        if self.vertex.is_none() {
-            let vbuf_size = SHADER_REFLECTION.attributes_range(..).unwrap().stride as u64 * 3;
+        if self.mesh.is_none() {
+            let cube = GltfModel::new("data/models/Cube.glb");
+            let cube_vertices : Vec<PosColor> = cube.meshes[0].vertices.iter().map(|v| PosColor {
+                position : v.a_pos.into(),
+                color    : [1.0, 0.0, 0.0, 1.0].into(),
+            }).collect();
+            let cube_indices = &cube.meshes[0].indices.as_ref().unwrap();
+
+            let vbuf_size = SHADER_REFLECTION.attributes_range(..).unwrap().stride as u64 * cube_vertices.len() as u64;
 
             let mut vbuf = factory
                 .create_buffer(
@@ -200,8 +228,7 @@ where
                         usage: hal::buffer::Usage::VERTEX,
                     },
                     Dynamic,
-                )
-                .unwrap();
+                ).unwrap();
 
             unsafe {
             // Fresh buffer.
@@ -209,36 +236,56 @@ where
                 .upload_visible_buffer(
                     &mut vbuf,
                     0,
-                    &[
-                        PosColor {
-                            position: [0.0, -0.5, 0.0].into(),
-                            color: [1.0, 0.0, 0.0, 1.0].into(),
-                        },
-                        PosColor {
-                            position: [0.5, 0.5, 0.0].into(),
-                            color: [0.0, 1.0, 0.0, 1.0].into(),
-                        },
-                        PosColor {
-                            position: [-0.5, 0.5, 0.0].into(),
-                            color: [0.0, 0.0, 1.0, 1.0].into(),
-                        },
-                    ],
+                    &cube_vertices,
                 ).unwrap();
             }
 
-            self.vertex = Some(vbuf);
+            let ibuf_size = (std::mem::size_of::<usize>() * cube_indices.len()) as u64;
+
+            let mut ibuf = factory
+                .create_buffer(
+                    BufferInfo {
+                        size  : ibuf_size,
+                        usage : hal::buffer::Usage::INDEX,
+                    },
+                    Dynamic,
+                ).unwrap();
+
+            unsafe {
+            factory
+                .upload_visible_buffer(
+                    &mut ibuf,
+                    0,
+                    &cube_indices,
+                ).unwrap();
+            }
+
+            self.mesh = Some((vbuf, ibuf));
         }
 
         //Update Uniform Data (offset based on current frame in flight index)
         unsafe {
             ROTATION = ROTATION + 0.01f32;
+
+            let mut perspective_matrix = glm::perspective_zo(
+                WIDTH as f32 / HEIGHT as f32,
+                degrees_to_radians(90.0f32),
+                100000.0,
+                0.01
+            );
+            perspective_matrix[(1,1)] *= -1.0;
+
             factory.upload_visible_buffer(
                 &mut self.uniform_buffer,
                 (std::mem::size_of::<UniformData>() * index) as u64, //access correct uni buffer
                 &[UniformData {
-                    model_matrix : glm::rotate_z(&glm::Mat4::identity(), ROTATION),
-                    view_matrix  : glm::Mat4::identity(),
-                    proj_matrix  : glm::Mat4::identity(),
+                    model_matrix :  glm::rotate_z(&glm::Mat4::identity(), ROTATION),
+                    view_matrix  :  glm::look_at(
+                                        &scene.camera_data.position,
+                                        &scene.camera_data.target,
+                                        &scene.camera_data.up,
+                                    ),
+                    proj_matrix  :  perspective_matrix.into(),
                 }]
             ).unwrap();
         }
@@ -262,9 +309,12 @@ where
                 Some(self.sets[index].raw()),
                 std::iter::empty(),
             );
-            let vbuf = self.vertex.as_ref().unwrap();
-            encoder.bind_vertex_buffers(0, Some((vbuf.raw(), 0)));
-            encoder.draw(0..3, 0..1);
+            if let Some(mesh) = &self.mesh {
+                let (vbuf, ibuf) = mesh;
+                encoder.bind_vertex_buffers(0, Some((vbuf.raw(), 0)));
+                encoder.bind_index_buffer(ibuf.raw(), 0, hal::IndexType::U32);
+                encoder.draw_indexed(0..36, 0, 0..1); //FIXME: need index buffer count
+            }
         }
     }
 
@@ -272,7 +322,7 @@ where
 }
 
 mod specs_systems;
-use specs_systems::{common::DeltaTime, spatial::{Position, Velocity, Acceleration, VelocitySystem, AccelerationSystem, PrinterSystem}};
+use specs_systems::{common::*, spatial::*};
 
 mod gltf_loader;
 use gltf_loader::*;
@@ -287,6 +337,7 @@ fn main() {
 
     let mut scene = Scene {
         test_model : gltf_model,
+        camera_data : CameraRenderData::new(),
         phantom : std::marker::PhantomData,
     };
 
@@ -298,7 +349,7 @@ fn main() {
 
     let window = WindowBuilder::new()
         .with_title("Rendy example")
-        .with_dimensions(dpi::LogicalSize::new(1280.0 as f64, 720.0 as f64))
+        .with_dimensions(dpi::LogicalSize::new(WIDTH, HEIGHT))
         .build(&event_loop)
         .unwrap();
 
@@ -321,7 +372,7 @@ fn main() {
     );
 
     let pass = graph_builder.add_node(
-        TriangleRenderPipeline::builder()
+        BasicRenderPipeline::builder()
             .into_subpass()
             .with_color(color)
             .into_pass(),
@@ -339,29 +390,43 @@ fn main() {
         .unwrap();
 
     //Specs setup
-    let specs_world = Arc::new(Mutex::new(World::new()));
+    let specs_world = Arc::new(RwLock::new(World::new()));
     
     let specs_dispatcher = {
         let mut dispatcher = DispatcherBuilder::new()
-            .with(VelocitySystem, "velocity_system", &[])
-            .with(AccelerationSystem, "acceleration_system", &["velocity_system"])
-            .with(PrinterSystem, "printer_system", &[])
+            .with(InputMovementSystem, "input_movement_system", &[])
+            .with(UpdateVelocitySystem, "acceleration_system", &[])
+            .with(UpdatePositionSystem, "velocity_system", &["input_movement_system", "acceleration_system"])
+            .with(UpdateCameraSystem, "update_camera_system", &["input_movement_system"])
         .build();
         //NOTE: has to be done before creating entities in world (seems problematic)
-        dispatcher.setup(&mut specs_world.lock().unwrap());
-        Arc::new(Mutex::new(dispatcher))
+        dispatcher.setup(&mut specs_world.write().unwrap());
+        Arc::new(RwLock::new(dispatcher))
     };
 
     {
-        let mut specs_world = specs_world.lock().unwrap();
+        let mut specs_world = specs_world.write().unwrap();
         specs_world.insert(DeltaTime(0.05)); //add a resource
-        specs_world.create_entity().with(Velocity(glm::vec3(2.0, 1.0, 3.0))).with(Position(glm::Vec3::new(1.0, 2.0, 3.0))).build();
-        specs_world.create_entity().with(Velocity(glm::vec3(200.0, 100.0, 300.0))).with(Position(glm::Vec3::new(1.0, 2.0, 3.0))).build();
+        specs_world.insert(InputState::new());
+        specs_world.insert(scene);
+        specs_world.create_entity().with(Velocity(glm::vec3(2.0, 1.0, 3.0))).with(Position(glm::vec3(1.0, 2.0, 3.0))).build();
+        specs_world.create_entity().with(Velocity(glm::vec3(200.0, 100.0, 300.0))).with(Position(glm::vec3(1.0, 2.0, 3.0))).build();
+        
+        //Camera
+        specs_world.create_entity()
+            .with(Position(glm::vec3(0.0, 0.0, -1.0)))
+            .with(Rotation(glm::quat(0.0, 1.0, 0.0, 0.0)))
+            .with(Velocity(glm::vec3(0.0, 0.0, 0.0)))
+            .with(Acceleration(glm::vec3(0.0, 0.0, 0.0)))
+            .with(Drag(1.75))
+            .with(InputComponent)
+            .with(ActiveCamera)
+            .build();
         
         specs_world.create_entity()
             .with(Velocity(glm::vec3(2.0, 1.0, 3.0)))
-            .with(Position(glm::Vec3::new(1.0, 2.0, 3.0)))
-            .with(Acceleration(glm::Vec3::new(2.0, 1.0, 2.0)))
+            .with(Position(glm::vec3(1.0, 2.0, 3.0)))
+            .with(Acceleration(glm::vec3(2.0, 1.0, 2.0)))
             .build();
 
         specs_world.create_entity().with(Position(glm::Vec3::new(1.0, 2.0, 3.0))).build();
@@ -371,29 +436,29 @@ fn main() {
         x + y
     }
 
-    fn dispatch_world(dispatcher: Arc<Mutex<specs::Dispatcher>>, world : Arc<Mutex<specs::World>>) {
-        dispatcher.lock().unwrap().dispatch_par(&world.lock().unwrap());
+    fn dispatch_world(dispatcher: Arc<RwLock<specs::Dispatcher>>, world : Arc<RwLock<specs::World>>) {
+        dispatcher.write().unwrap().dispatch_par(&world.read().unwrap());
     }
 
     let mut rhai_engine = rhai::Engine::new();
     rhai_engine.register_fn("add", add);
     rhai_engine.register_fn("dispatch_world", dispatch_world);
-    rhai_engine.register_type::<Arc<Mutex<specs::Dispatcher>>>();
-    rhai_engine.register_type::<Arc<Mutex<specs::World>>>();
+    rhai_engine.register_type::<Arc<RwLock<specs::Dispatcher>>>();
+    rhai_engine.register_type::<Arc<RwLock<specs::World>>>();
    
     let mut scope = Scope::new();
     scope.push(("dispatcher".to_string(), Box::new(specs_dispatcher.clone())));
     scope.push(("world". to_string(), Box::new(specs_world.clone())));
 
-    loop {
+    let mut delta_time = Instant::now();
 
-        //TODO: Actually compute delta time
-        *specs_world.lock().unwrap().write_resource::<DeltaTime>() = DeltaTime(0.04);
+    loop {
 
         //Execute Rhai Script
         rhai_engine.eval_with_scope::<()>(&mut scope, "dispatch_world(dispatcher, world)").expect("Failed to run rhai code");
 
         let mut should_close = false;
+        let mut new_delta = (0., 0.);
         event_loop.poll_events(|event| {
             match event {
                 rendy::wsi::winit::Event::WindowEvent{window_id : _, event} => {
@@ -401,27 +466,69 @@ fn main() {
                         rendy::wsi::winit::WindowEvent::CloseRequested => {
                             should_close = true;
                         },
+                        rendy::wsi::winit::WindowEvent::KeyboardInput { device_id : _, input } => {
+                            match input.virtual_keycode {
+                                Some(keycode) => {
+                                    let specs_world = specs_world.write().unwrap();
+                                    specs_world.write_resource::<InputState>().key_states.insert(keycode, input.state == rendy::wsi::winit::ElementState::Pressed);
+
+                                    match keycode {
+                                        VirtualKeyCode::Escape => should_close = true,
+                                        _ => {},
+                                    }
+                                },
+                                _ => {},
+                            }
+                        },
                         _ => {},
                     }
                 },
+                rendy::wsi::winit::Event::DeviceEvent { event, ..} => {
+                    match event {
+                        rendy::wsi::winit::DeviceEvent::MouseMotion { delta } => {
+                            new_delta = (delta.0 as f32, delta.1 as f32);
+                        },
+                        _ => {},
+                    }
+                }
                 _ => {},
             }
         });
+
+        {
+            let specs_world = specs_world.write().unwrap();
+            *specs_world.write_resource::<DeltaTime>() = DeltaTime(delta_time.elapsed().as_secs_f32());
+            delta_time = Instant::now();
+            specs_world.write_resource::<InputState>().mouse_delta = new_delta;
+        }
 
         if should_close { break; }
         
         //TODO: Wrap in render system
         factory.maintain(&mut families);
         event_loop.poll_events(|_| ());
-        graph.run(&mut factory, &mut families, &mut scene);
+        {
+            let specs_world = specs_world.write().unwrap();
+            let mut scene = specs_world.write_resource::<Scene<Backend>>();
+            graph.run(&mut factory, &mut families, &mut scene);
+        }
     }
 
-    graph.dispose(&mut factory, &mut scene);
+    {
+        let specs_world = specs_world.write().unwrap();
+        let mut scene = specs_world.write_resource::<Scene<Backend>>();
+        graph.dispose(&mut factory, &mut scene);
+    }
 }
 
 #[cfg(not(any(feature = "dx12", feature = "metal", feature = "vulkan")))]
 fn main() {
     panic!("Specify feature: { dx12, metal, vulkan }");
+}
+
+fn degrees_to_radians<T>( deg: T) -> T 
+where T: num::Float {
+    deg * num::cast(0.0174533).unwrap()
 }
 
 // TODO: 1. Crate to convert GLTF Animation data to a fast-readable format (bake matrices at each bone)
