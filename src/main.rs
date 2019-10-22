@@ -3,9 +3,11 @@
     allow(unused)
 )]
 
-use std::sync::{Arc, RwLock};
-use std::path::PathBuf;
-use std::time::{Instant};
+use std::{
+    sync::{Arc, RwLock},
+    path::PathBuf, 
+    time::Instant,
+};
 
 #[macro_use]
 extern crate derive_deref;
@@ -20,8 +22,9 @@ use rendy::{
     memory::Dynamic,
     mesh::PosColor,
     resource::{Buffer, BufferInfo, DescriptorSet, DescriptorSetLayout, Escape, Handle},
-    shader::{ShaderKind, SourceLanguage, PathBufShaderInfo, ShaderSet},
+    shader::{ShaderKind, SourceLanguage, PathBufShaderInfo, ShaderSet, SpirvReflection},
     wsi::winit::{EventsLoop, WindowBuilder, dpi, VirtualKeyCode},
+    wsi::winit as winit,
 };
 
 extern crate nalgebra_glm as glm;
@@ -34,8 +37,6 @@ extern crate specs_derive;
 extern crate rhai;
 use rhai::{RegisterFn, Scope};
 
-use rendy::shader::SpirvReflection;
-
 #[cfg(feature = "dx12")]
 pub type Backend = rendy::dx12::Backend;
 
@@ -47,14 +48,14 @@ pub type Backend = rendy::vulkan::Backend;
 
 lazy_static::lazy_static! {
     static ref VERTEX: PathBufShaderInfo = PathBufShaderInfo::new(
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/shaders/triangle.vert")),
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/shaders/basic.vert")),
         ShaderKind::Vertex,
         SourceLanguage::GLSL,
         "main",
-    );
+    );  
 
     static ref FRAGMENT: PathBufShaderInfo = PathBufShaderInfo::new(
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/shaders/triangle.frag")),
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/shaders/basic.frag")),
         ShaderKind::Fragment,
         SourceLanguage::GLSL,
         "main",
@@ -109,7 +110,9 @@ struct BasicRenderPipelineDesc;
 struct BasicRenderPipeline<B: hal::Backend> {
     mesh: Option<(Escape<Buffer<B>>, Escape<Buffer<B>>)>,
     sets: Vec<Escape<DescriptorSet<B>>>,
-    uniform_buffer: Escape<Buffer<B>>
+    uniform_buffers: Vec<Escape<Buffer<B>>>, 
+    /*NOTE: To Store in a single uniform_buffer, could base offset on buffer_size and frame "index", but also need 
+            to add to that offset to reach the minUniformBufferOffsetAlignment physical device limit */
 }
 
 impl<B> SimpleGraphicsPipelineDesc<B, Scene<B>> for BasicRenderPipelineDesc
@@ -162,18 +165,21 @@ where
         let frames_in_flight_count = ctx.frames_in_flight as u64;
 
         let uniform_size = std::mem::size_of::<UniformData>() as u64;
-        let uniform_buffer = factory
-            .create_buffer(
-                BufferInfo {
-                    size: uniform_size * frames_in_flight_count,
-                    usage: hal::buffer::Usage::UNIFORM,
-                },
-                Dynamic,
-            )
-            .unwrap();
+        let mut uniform_buffers = Vec::new();
 
         let mut sets = Vec::new();
-        for index in 0..frames_in_flight_count {
+        for index in 0..frames_in_flight_count as usize {
+            uniform_buffers.push(factory
+                .create_buffer(
+                    BufferInfo {
+                        size: uniform_size,
+                        usage: hal::buffer::Usage::UNIFORM,
+                    },
+                    Dynamic,
+                )
+                .unwrap()
+            );
+
             sets.push( unsafe {
                 let set = factory
                     .create_descriptor_set(set_layouts[0].clone())
@@ -183,15 +189,17 @@ where
                     binding: 0,
                     array_offset: 0,
                     descriptors: Some(hal::pso::Descriptor::Buffer(
-                        uniform_buffer.raw(),
-                        Some(uniform_size * index) .. Some(uniform_size * (index + 1))
+                        uniform_buffers[index].raw(),
+                        Some(0) .. Some(uniform_size)
                     )),
                 }));
                 set
             });
         }
 
-        Ok(BasicRenderPipeline { mesh: None, sets, uniform_buffer})
+        println!("uniform buffers array len: {}", uniform_buffers.len());
+
+        Ok(BasicRenderPipeline { mesh: None, sets, uniform_buffers})
     }
 }
 
@@ -276,10 +284,10 @@ where
             perspective_matrix[(1,1)] *= -1.0;
 
             factory.upload_visible_buffer(
-                &mut self.uniform_buffer,
-                (std::mem::size_of::<UniformData>() * index) as u64, //access correct uni buffer
+                &mut self.uniform_buffers[index], //access correct uni buffer
+                0, 
                 &[UniformData {
-                    model_matrix :  glm::rotate_z(&glm::Mat4::identity(), ROTATION),
+                    model_matrix :  glm::rotate_y(&glm::Mat4::identity(), ROTATION),
                     view_matrix  :  glm::look_at(
                                         &scene.camera_data.position,
                                         &scene.camera_data.target,
@@ -330,7 +338,6 @@ use gltf_loader::*;
 #[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
 fn main() {
     env_logger::Builder::from_default_env()
-        .filter_module("triangle", log::LevelFilter::Trace)
         .init();
 
     let gltf_model = GltfModel::new("data/models/Running.glb");
@@ -348,7 +355,7 @@ fn main() {
     let mut event_loop = EventsLoop::new();
 
     let window = WindowBuilder::new()
-        .with_title("Rendy example")
+        .with_title("Oxandi")
         .with_dimensions(dpi::LogicalSize::new(WIDTH, HEIGHT))
         .build(&event_loop)
         .unwrap();
@@ -371,18 +378,18 @@ fn main() {
         Some(hal::command::ClearValue::Color([1.0, 1.0, 1.0, 1.0].into())),
     );
 
-    let pass = graph_builder.add_node(
+    let basic_pass = graph_builder.add_node(
         BasicRenderPipeline::builder()
             .into_subpass()
             .with_color(color)
             .into_pass(),
     );
 
-    let present_builder = PresentNode::builder(&factory, surface, color).with_dependency(pass);
+    let present_pass = PresentNode::builder(&factory, surface, color).with_dependency(basic_pass);
 
-    let frames_in_flight_count = present_builder.image_count();
+    let frames_in_flight_count = present_pass.image_count();
 
-    graph_builder.add_node(present_builder);
+    graph_builder.add_node(present_pass);
 
     let mut graph = graph_builder
         .with_frames_in_flight(frames_in_flight_count)
@@ -418,8 +425,8 @@ fn main() {
             .with(Rotation(glm::quat(0.0, 1.0, 0.0, 0.0)))
             .with(Velocity(glm::vec3(0.0, 0.0, 0.0)))
             .with(Acceleration(glm::vec3(0.0, 0.0, 0.0)))
-            .with(Drag(1.75))
-            .with(InputComponent)
+            .with(Drag(10.0))
+            .with(InputComponent { move_speed : 20.0 })
             .with(ActiveCamera)
             .build();
         
@@ -432,16 +439,11 @@ fn main() {
         specs_world.create_entity().with(Position(glm::Vec3::new(1.0, 2.0, 3.0))).build();
     }
 
-    fn add(x : i64, y : i64) -> i64 {
-        x + y
-    }
-
     fn dispatch_world(dispatcher: Arc<RwLock<specs::Dispatcher>>, world : Arc<RwLock<specs::World>>) {
         dispatcher.write().unwrap().dispatch_par(&world.read().unwrap());
     }
 
     let mut rhai_engine = rhai::Engine::new();
-    rhai_engine.register_fn("add", add);
     rhai_engine.register_fn("dispatch_world", dispatch_world);
     rhai_engine.register_type::<Arc<RwLock<specs::Dispatcher>>>();
     rhai_engine.register_type::<Arc<RwLock<specs::World>>>();
@@ -461,16 +463,16 @@ fn main() {
         let mut new_delta = (0., 0.);
         event_loop.poll_events(|event| {
             match event {
-                rendy::wsi::winit::Event::WindowEvent{window_id : _, event} => {
+                winit::Event::WindowEvent{window_id : _, event} => {
                     match event {
-                        rendy::wsi::winit::WindowEvent::CloseRequested => {
+                        winit::WindowEvent::CloseRequested => {
                             should_close = true;
                         },
-                        rendy::wsi::winit::WindowEvent::KeyboardInput { device_id : _, input } => {
+                        winit::WindowEvent::KeyboardInput { device_id : _, input } => {
                             match input.virtual_keycode {
                                 Some(keycode) => {
                                     let specs_world = specs_world.write().unwrap();
-                                    specs_world.write_resource::<InputState>().key_states.insert(keycode, input.state == rendy::wsi::winit::ElementState::Pressed);
+                                    specs_world.write_resource::<InputState>().key_states.insert(keycode, input.state == winit::ElementState::Pressed);
 
                                     match keycode {
                                         VirtualKeyCode::Escape => should_close = true,
@@ -480,12 +482,27 @@ fn main() {
                                 _ => {},
                             }
                         },
+                        winit::WindowEvent::MouseInput { state, button, ..} => {
+                            let pressed = state == winit::ElementState::Pressed;
+                            let specs_world = specs_world.write().unwrap();
+                            let mouse_button_states = &mut specs_world.write_resource::<InputState>().mouse_button_states;
+                            match button {
+                                winit::MouseButton::Left   => mouse_button_states[0] = pressed,
+                                winit::MouseButton::Right  => mouse_button_states[1] = pressed,
+                                winit::MouseButton::Middle => mouse_button_states[2] = pressed,
+                                winit::MouseButton::Other(idx) => {
+                                    if (idx as usize) < mouse_button_states.len() {
+                                        mouse_button_states[idx as usize] = pressed;
+                                    }
+                                }
+                            }
+                        },
                         _ => {},
                     }
                 },
-                rendy::wsi::winit::Event::DeviceEvent { event, ..} => {
+                winit::Event::DeviceEvent { event, ..} => {
                     match event {
-                        rendy::wsi::winit::DeviceEvent::MouseMotion { delta } => {
+                        winit::DeviceEvent::MouseMotion { delta } => {
                             new_delta = (delta.0 as f32, delta.1 as f32);
                         },
                         _ => {},

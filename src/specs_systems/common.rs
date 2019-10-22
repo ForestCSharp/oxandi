@@ -29,17 +29,23 @@ impl InputState {
 }
 
 #[derive(Default, Component)]
-#[storage(NullStorage)]
-pub struct InputComponent;
+pub struct InputComponent {
+    pub move_speed : f32,
+}
 
 pub struct InputMovementSystem;
 
 impl<'a> System<'a> for InputMovementSystem {
 
-    type SystemData = (Read<'a, DeltaTime>, Read<'a, InputState>, ReadStorage<'a, InputComponent>, WriteStorage<'a, Velocity>, WriteStorage<'a, Rotation>);
+    type SystemData = ( Read<'a, DeltaTime>, 
+                        Read<'a, InputState>, 
+                        ReadStorage<'a, InputComponent>, 
+                        WriteStorage<'a, Velocity>, 
+                        WriteStorage<'a, Rotation>,
+                      );
 
     fn run(&mut self, (dt, input_state, input_component, mut velocity, mut rotation): Self::SystemData) {
-        for (_, velocity, mut rotation) in (&input_component, &mut velocity, &mut rotation).join() {
+        for (input_component, velocity, mut rotation) in (&input_component, &mut velocity, &mut rotation).join() {
             let is_key_pressed = |keycode : VirtualKeyCode| {
                 input_state.key_states.get(&keycode) == Some(&true)
             };
@@ -57,14 +63,14 @@ impl<'a> System<'a> for InputMovementSystem {
             }
 
             //Rotate Based on Mouse Delta
-            let yaw_rotation = glm::quat_angle_axis(degrees_to_radians(-input_state.mouse_delta.0 * 50.0* dt.0) as f32, &glm::vec3(0., 1., 0.));
-            let pitch_rotation = glm::quat_angle_axis(degrees_to_radians(-input_state.mouse_delta.1 * 50.0 * dt.0) as f32, &right_vec);
-            let new_rotation = glm::quat_normalize(&(pitch_rotation * rotation.0* yaw_rotation));
-
-            rotation.0 = new_rotation;
+            if input_state.mouse_button_states[0] {
+                let yaw_rotation = glm::quat_angle_axis(degrees_to_radians(-input_state.mouse_delta.0 * 100.0* dt.0) as f32, &glm::vec3(0., 1., 0.));
+                let pitch_rotation = glm::quat_angle_axis(degrees_to_radians(-input_state.mouse_delta.1 * 100.0 * dt.0) as f32, &right_vec);
+                rotation.0 = glm::quat_normalize(&(yaw_rotation * pitch_rotation * rotation.0));
+            }
             
             //TODO: move_speed variable in input component?
-            let move_speed = 10.0;
+            let move_speed = input_component.move_speed;
 
             if is_key_pressed(VirtualKeyCode::W) {
                 velocity.0 += forward_vec * dt.0 * move_speed;

@@ -21,12 +21,15 @@ pub struct UpdatePositionSystem;
 
 impl<'a> System<'a> for UpdatePositionSystem {
 
-    type SystemData = (Read<'a, DeltaTime>, WriteStorage<'a, Position>, ReadStorage<'a, Velocity>, Entities<'a>);
+    type SystemData = ( Read<'a, DeltaTime>, 
+                        WriteStorage<'a, Position>, 
+                        ReadStorage<'a, Velocity>
+                      );
 
-    fn run(&mut self, (dt, mut positions, velocities, entities): Self::SystemData) {
+    fn run(&mut self, (dt, mut positions, velocities): Self::SystemData) {
  
         //Testing inserting entities
-        // let new_entity = entities.create();
+        // let new_entity = entities.create(); //
         // positions.insert(new_entity, positions(glm::vec3(0.,0.,0.))));
 
         (&velocities, &mut positions)
@@ -53,7 +56,7 @@ impl<'a> System<'a> for UpdateVelocitySystem {
         }
 
         //drag causes velocity to approach zero from either direction (pos/neg velocity values)
-        for (vel, acc, drag) in (&mut vel, &acc, &drag).join() {
+        for (vel, drag) in (&mut vel, &drag).join() {
             let new_abs_vel = glm::clamp(&(vel.0.abs() - glm::vec3(drag.0, drag.0, drag.0) * dt.0), 0.0, std::f32::MAX);
 
             vel.x = new_abs_vel.x.copysign(vel.x);
