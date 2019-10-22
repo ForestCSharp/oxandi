@@ -122,7 +122,14 @@ where
     type Pipeline = BasicRenderPipeline<B>;
 
     fn depth_stencil(&self) -> Option<hal::pso::DepthStencilDesc> {
-        None
+        Some(hal::pso::DepthStencilDesc {
+            depth: Some(hal::pso::DepthTest {
+                    fun: hal::pso::Comparison::GreaterEqual,
+                    write: true,
+            }),
+            depth_bounds: false,
+            stencil: None,
+        })
     }
 
     fn load_shader_set(
@@ -371,17 +378,29 @@ fn main() {
         .unwrap()
         .to_physical(window.get_hidpi_factor());
 
+    let window_kind = hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1);
+
     let color = graph_builder.create_image(
-        hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1),
+        window_kind,
         1,
         factory.get_surface_format(&surface),
         Some(hal::command::ClearValue::Color([1.0, 1.0, 1.0, 1.0].into())),
+    );
+
+    let depth = graph_builder.create_image(
+        window_kind,
+        1,
+        hal::format::Format::D16Unorm,
+        Some(hal::command::ClearValue::DepthStencil(
+            hal::command::ClearDepthStencil(0.0, 0),
+        )),
     );
 
     let basic_pass = graph_builder.add_node(
         BasicRenderPipeline::builder()
             .into_subpass()
             .with_color(color)
+            .with_depth_stencil(depth)
             .into_pass(),
     );
 
