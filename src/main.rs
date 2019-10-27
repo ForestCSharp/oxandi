@@ -7,7 +7,20 @@ use std::{
     sync::{Arc, RwLock},
     path::PathBuf, 
     time::Instant,
+    collections::HashMap,
 };
+
+macro_rules! map(
+    { $($key:expr => $value:expr),+ } => {
+        {
+            let mut m = ::std::collections::HashMap::new();
+            $(
+                m.insert($key, $value);
+            )+
+            m
+        }
+     };
+);
 
 #[macro_use]
 extern crate derive_deref;
@@ -90,7 +103,7 @@ impl CameraRenderData {
 }
 
 pub struct Scene<B: hal::Backend> {
-    pub test_model : GltfModel,
+    pub specs_world : Arc<RwLock<World>>,
     pub camera_data : CameraRenderData,
     pub phantom: std::marker::PhantomData<B>,
 }
@@ -108,11 +121,8 @@ struct BasicRenderPipelineDesc;
 
 #[derive(Debug)]
 struct BasicRenderPipeline<B: hal::Backend> {
-    mesh: Option<(Escape<Buffer<B>>, Escape<Buffer<B>>)>,
     sets: Vec<Escape<DescriptorSet<B>>>,
-    uniform_buffers: Vec<Escape<Buffer<B>>>, 
-    /*NOTE: To Store in a single uniform_buffer, could base offset on buffer_size and frame "index", but also need 
-            to add to that offset to reach the minUniformBufferOffsetAlignment physical device limit */
+    uniform_buffers: Vec<Escape<Buffer<B>>>,
 }
 
 impl<B> SimpleGraphicsPipelineDesc<B, Scene<B>> for BasicRenderPipelineDesc
@@ -169,13 +179,12 @@ where
         assert!(images.is_empty());
         assert!(set_layouts.len() > 0);
 
-        let frames_in_flight_count = ctx.frames_in_flight as u64;
-
         let uniform_size = std::mem::size_of::<UniformData>() as u64;
         let mut uniform_buffers = Vec::new();
 
+        //TODO: make hashmap for desc sets / uni buffers and hash by GpuMesh
         let mut sets = Vec::new();
-        for index in 0..frames_in_flight_count as usize {
+        for index in 0..ctx.frames_in_flight as usize {
             uniform_buffers.push(factory
                 .create_buffer(
                     BufferInfo {
@@ -204,9 +213,12 @@ where
             });
         }
 
-        println!("uniform buffers array len: {}", uniform_buffers.len());
+        println!("Building");
 
-        Ok(BasicRenderPipeline { mesh: None, sets, uniform_buffers})
+        Ok(BasicRenderPipeline{
+            sets: sets,
+            uniform_buffers : uniform_buffers,
+        })
     }
 }
 
@@ -226,58 +238,6 @@ where
         index: usize,
         scene : &Scene<B>,
     ) -> PrepareResult {
-        if self.mesh.is_none() {
-            let cube = GltfModel::new("data/models/Cube.glb");
-            let cube_vertices : Vec<PosColor> = cube.meshes[0].vertices.iter().map(|v| PosColor {
-                position : v.a_pos.into(),
-                color    : [1.0, 0.0, 0.0, 1.0].into(),
-            }).collect();
-            let cube_indices = &cube.meshes[0].indices.as_ref().unwrap();
-
-            let vbuf_size = SHADER_REFLECTION.attributes_range(..).unwrap().stride as u64 * cube_vertices.len() as u64;
-
-            let mut vbuf = factory
-                .create_buffer(
-                    BufferInfo {
-                        size: vbuf_size,
-                        usage: hal::buffer::Usage::VERTEX,
-                    },
-                    Dynamic,
-                ).unwrap();
-
-            unsafe {
-            // Fresh buffer.
-            factory
-                .upload_visible_buffer(
-                    &mut vbuf,
-                    0,
-                    &cube_vertices,
-                ).unwrap();
-            }
-
-            let ibuf_size = (std::mem::size_of::<usize>() * cube_indices.len()) as u64;
-
-            let mut ibuf = factory
-                .create_buffer(
-                    BufferInfo {
-                        size  : ibuf_size,
-                        usage : hal::buffer::Usage::INDEX,
-                    },
-                    Dynamic,
-                ).unwrap();
-
-            unsafe {
-            factory
-                .upload_visible_buffer(
-                    &mut ibuf,
-                    0,
-                    &cube_indices,
-                ).unwrap();
-            }
-
-            self.mesh = Some((vbuf, ibuf));
-        }
-
         //Update Uniform Data (offset based on current frame in flight index)
         unsafe {
             ROTATION = ROTATION + 0.01f32;
@@ -305,30 +265,33 @@ where
             ).unwrap();
         }
 
-        PrepareResult::DrawReuse
+        /* Alternatively, DrawReuse only records command buffers once, useful when rendered items never changes 
+            (i.e. fullscreen quad for GBuff lighting / PostProcess) */
+        PrepareResult::DrawRecord
     }
 
-    //FCS Note: this is only called once per frame-in-flight, prepare called every frame
     fn draw(
         &mut self,
         layout: &B::PipelineLayout,
         mut encoder: RenderPassEncoder<'_, B>,
         index: usize,
-        _scene : &Scene<B>,
+        scene : &Scene<B>,
     ) {
-        println!("Index: {}", index);
         unsafe {
-            encoder.bind_graphics_descriptor_sets(
-                layout,
-                0,
-                Some(self.sets[index].raw()),
-                std::iter::empty(),
-            );
-            if let Some(mesh) = &self.mesh {
-                let (vbuf, ibuf) = mesh;
-                encoder.bind_vertex_buffers(0, Some((vbuf.raw(), 0)));
-                encoder.bind_index_buffer(ibuf.raw(), 0, hal::IndexType::U32);
-                encoder.draw_indexed(0..36, 0, 0..1); //FIXME: need index buffer count
+            let specs_world = scene.specs_world.read().expect("Failed to read from scene.specs_world RwLock");
+            let specs_mesh_storage = specs_world.read_storage::<MeshComponent<B>>();
+
+            for mesh in specs_mesh_storage.join() {
+                encoder.bind_graphics_descriptor_sets(
+                    layout,
+                    0,
+                    Some(self.sets[index].raw()),
+                    std::iter::empty(),
+                ); //FIXME: create and store sets for each mesh
+
+                encoder.bind_vertex_buffers(0, Some((mesh.vertex_buffer.raw(), 0)));
+                encoder.bind_index_buffer(mesh.index_buffer.raw(), 0, hal::IndexType::U32);
+                encoder.draw_indexed(0..mesh.num_indices, 0, 0..1);
             }
         }
     }
@@ -337,7 +300,7 @@ where
 }
 
 mod specs_systems;
-use specs_systems::{common::*, spatial::*};
+use specs_systems::{common::*, spatial::*, mesh::*};
 
 mod gltf_loader;
 use gltf_loader::*;
@@ -348,12 +311,6 @@ fn main() {
         .init();
 
     let gltf_model = GltfModel::new("data/models/Running.glb");
-
-    let mut scene = Scene {
-        test_model : gltf_model,
-        camera_data : CameraRenderData::new(),
-        phantom : std::marker::PhantomData,
-    };
 
     let config: Config = Default::default();
 
@@ -410,13 +367,19 @@ fn main() {
 
     graph_builder.add_node(present_pass);
 
+    //Specs setup
+    let specs_world = Arc::new(RwLock::new(World::new()));
+
+    let mut scene = Scene {
+        specs_world : specs_world.clone(),
+        camera_data : CameraRenderData::new(),
+        phantom : std::marker::PhantomData,
+    };
+
     let mut graph = graph_builder
         .with_frames_in_flight(frames_in_flight_count)
         .build(&mut factory, &mut families, &mut scene)
         .unwrap();
-
-    //Specs setup
-    let specs_world = Arc::new(RwLock::new(World::new()));
     
     let specs_dispatcher = {
         let mut dispatcher = DispatcherBuilder::new()
@@ -437,6 +400,9 @@ fn main() {
         specs_world.insert(scene);
         specs_world.create_entity().with(Velocity(glm::vec3(2.0, 1.0, 3.0))).with(Position(glm::vec3(1.0, 2.0, 3.0))).build();
         specs_world.create_entity().with(Velocity(glm::vec3(200.0, 100.0, 300.0))).with(Position(glm::vec3(1.0, 2.0, 3.0))).build();
+
+        specs_world.register::<MeshComponent<Backend>>(); //FIXME: can remove this once a system using MeshComponent is hooked up to world
+        specs_world.create_entity().with(Position(glm::vec3(0.0, 0.0, 0.0))).with(MeshComponent::new(&mut factory)).build();
         
         //Camera
         specs_world.create_entity()
@@ -490,7 +456,7 @@ fn main() {
                         winit::WindowEvent::KeyboardInput { device_id : _, input } => {
                             match input.virtual_keycode {
                                 Some(keycode) => {
-                                    let specs_world = specs_world.write().unwrap();
+                                    let specs_world = specs_world.read().unwrap();
                                     specs_world.write_resource::<InputState>().key_states.insert(keycode, input.state == winit::ElementState::Pressed);
 
                                     match keycode {
@@ -503,7 +469,7 @@ fn main() {
                         },
                         winit::WindowEvent::MouseInput { state, button, ..} => {
                             let pressed = state == winit::ElementState::Pressed;
-                            let specs_world = specs_world.write().unwrap();
+                            let specs_world = specs_world.read().unwrap();
                             let mouse_button_states = &mut specs_world.write_resource::<InputState>().mouse_button_states;
                             match button {
                                 winit::MouseButton::Left   => mouse_button_states[0] = pressed,
@@ -532,7 +498,7 @@ fn main() {
         });
 
         {
-            let specs_world = specs_world.write().unwrap();
+            let specs_world = specs_world.read().unwrap();
             *specs_world.write_resource::<DeltaTime>() = DeltaTime(delta_time.elapsed().as_secs_f32());
             delta_time = Instant::now();
             specs_world.write_resource::<InputState>().mouse_delta = new_delta;
@@ -544,14 +510,14 @@ fn main() {
         factory.maintain(&mut families);
         event_loop.poll_events(|_| ());
         {
-            let specs_world = specs_world.write().unwrap();
+            let specs_world = specs_world.read().unwrap();
             let mut scene = specs_world.write_resource::<Scene<Backend>>();
             graph.run(&mut factory, &mut families, &mut scene);
         }
     }
 
     {
-        let specs_world = specs_world.write().unwrap();
+        let specs_world = specs_world.read().unwrap();
         let mut scene = specs_world.write_resource::<Scene<Backend>>();
         graph.dispose(&mut factory, &mut scene);
     }
