@@ -5,7 +5,7 @@ use crate::DeltaTime;
 #[derive(Debug, Component)]
 pub struct Transform {
     pub position : glm::Vec3,
-    pub rotation : glm::Quat,
+    pub rotation : glm::Quat, //TODO: need to always ensure this is a unit quaternion, as it represents an orientation
     pub scale    : glm::Vec3,
 }
 
@@ -21,6 +21,9 @@ impl Transform {
 
 #[derive(Debug, Component, Deref, DerefMut)]
 pub struct Velocity(pub glm::Vec3);
+
+#[derive(Debug, Component, Deref, DerefMut)]
+pub struct AngularVelocity(pub glm::Quat);
 
 #[derive(Debug, Component, Deref, DerefMut)]
 pub struct Acceleration(pub glm::Vec3);
@@ -70,5 +73,26 @@ impl<'a> System<'a> for UpdateVelocitySystem {
             vel.y = new_abs_vel.y.copysign(vel.y);
             vel.z = new_abs_vel.z.copysign(vel.z);
         }
+    }
+}
+
+pub struct UpdateRotationSystem;
+
+impl<'a> System<'a> for UpdateRotationSystem {
+
+    type SystemData = ( Read<'a, DeltaTime>, 
+                        WriteStorage<'a, Transform>, 
+                        ReadStorage<'a, AngularVelocity>
+                      );
+
+    fn run(&mut self, (dt, mut transforms, angular_velocities): Self::SystemData) {
+
+        (&angular_velocities, &mut transforms)
+        .par_join()
+        .for_each(|(angular_velocity, transform)| {
+            let mut scaled_angular_velocity = angular_velocity.0;
+            scaled_angular_velocity.w *= dt.0;
+            transform.rotation = glm::quat_normalize(&(transform.rotation * scaled_angular_velocity));
+        });
     }
 }

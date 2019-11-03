@@ -205,6 +205,8 @@ where
         scene : &Scene<B>,
     ) -> PrepareResult {
         assert!(set_layouts.len() > 0);
+        
+        //TODO: destroy mesh_data for meshes that no longer exist
 
         let specs_world = scene.specs_world.read().expect("Failed to read from scene.specs_world RwLock");
         let specs_entities = specs_world.entities();
@@ -260,15 +262,15 @@ where
 
                     let model_matrix = {
                         let mut model_matrix = glm::identity();
-                        //TODO: Scale
-                        //TODO: Rotation
                         model_matrix = glm::translate(&model_matrix, &transform.position);
+                        model_matrix *= glm::quat_to_mat4(&transform.rotation);
+                        //TODO: Scale
                         model_matrix
                     };
 
                     let mut perspective_matrix = glm::perspective_zo(
                         WIDTH as f32 / HEIGHT as f32,
-                        degrees_to_radians(90.0f32),
+                        degrees_to_radians(60.0f32),
                         100000.0,
                         0.01
                     );
@@ -414,7 +416,8 @@ fn main() {
         let mut dispatcher = DispatcherBuilder::new()
             .with(InputMovementSystem, "input_movement_system", &[])
             .with(UpdateVelocitySystem, "acceleration_system", &[])
-            .with(UpdatePositionSystem, "velocity_system", &["input_movement_system", "acceleration_system"])
+            .with(UpdatePositionSystem, "update_position_system", &["input_movement_system", "acceleration_system"])
+            .with(UpdateRotationSystem, "update_rotation_system", &["input_movement_system"])
             .with(UpdateCameraSystem, "update_camera_system", &["input_movement_system"])
         .build();
         //NOTE: has to be done before creating entities in world (seems problematic)
@@ -432,7 +435,13 @@ fn main() {
 
         specs_world.register::<MeshComponent<Backend>>(); //FIXME: can remove this once a system using MeshComponent is hooked up to world
         specs_world.create_entity().with(Transform::new()).with(MeshComponent::new(&mut factory)).build();
-        specs_world.create_entity().with(Transform::new()).with(Velocity(glm::vec3(0.5, 0.0, 0.0))).with(MeshComponent::new(&mut factory)).build();
+        
+        specs_world.create_entity()
+            .with(MeshComponent::new(&mut factory))
+            .with(Transform::new())
+            .with(Velocity(glm::vec3(0.5, 0.0, 0.0)))
+            .with(AngularVelocity(glm::quat(0.0, 1.0, 1.0, 5.0)))
+            .build();
         
         //Camera
         specs_world.create_entity()
