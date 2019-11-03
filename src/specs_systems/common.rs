@@ -3,7 +3,7 @@ use specs::prelude::*;
 use rendy::wsi::winit::VirtualKeyCode;
 use std::collections::HashMap;
 
-use crate::specs_systems::spatial::{Position, Velocity, Rotation};
+use crate::specs_systems::spatial::{Transform, Velocity};
 
 use super::super::Scene;
 use super::super::Backend;
@@ -41,20 +41,20 @@ impl<'a> System<'a> for InputMovementSystem {
                         Read<'a, InputState>, 
                         ReadStorage<'a, InputComponent>, 
                         WriteStorage<'a, Velocity>, 
-                        WriteStorage<'a, Rotation>,
+                        WriteStorage<'a, Transform>,
                       );
 
-    fn run(&mut self, (dt, input_state, input_component, mut velocity, mut rotation): Self::SystemData) {
-        for (input_component, velocity, mut rotation) in (&input_component, &mut velocity, &mut rotation).join() {
+    fn run(&mut self, (dt, input_state, input_component, mut velocity, mut transform): Self::SystemData) {
+        for (input_component, velocity, mut transform) in (&input_component, &mut velocity, &mut transform).join() {
             let is_key_pressed = |keycode : VirtualKeyCode| {
                 input_state.key_states.get(&keycode) == Some(&true)
             };
             
             //Normalize quaternion
-            rotation.0 = glm::quat_normalize(&rotation.0);
+            transform.rotation = glm::quat_normalize(&transform.rotation);
 
-            let forward_vec = glm::quat_rotate_vec3(rotation, &glm::vec3(0.0, 0.0, 1.0));
-            let up_vec      = glm::quat_rotate_vec3(rotation, &glm::vec3(0.0, 1.0, 0.0));
+            let forward_vec = glm::quat_rotate_vec3(&transform.rotation, &glm::vec3(0.0, 0.0, 1.0));
+            let up_vec      = glm::quat_rotate_vec3(&transform.rotation, &glm::vec3(0.0, 1.0, 0.0));
             let right_vec   = forward_vec.cross(&up_vec);
 
             fn degrees_to_radians<T>( deg: T) -> T 
@@ -66,7 +66,7 @@ impl<'a> System<'a> for InputMovementSystem {
             if input_state.mouse_button_states[0] {
                 let yaw_rotation = glm::quat_angle_axis(degrees_to_radians(-input_state.mouse_delta.0 * 100.0* dt.0) as f32, &glm::vec3(0., 1., 0.));
                 let pitch_rotation = glm::quat_angle_axis(degrees_to_radians(-input_state.mouse_delta.1 * 100.0 * dt.0) as f32, &right_vec);
-                rotation.0 = glm::quat_normalize(&(yaw_rotation * pitch_rotation * rotation.0));
+                transform.rotation = glm::quat_normalize(&(yaw_rotation * pitch_rotation * transform.rotation));
             }
             
             //TODO: move_speed variable in input component?
@@ -107,20 +107,20 @@ pub struct UpdateCameraSystem;
 
 impl<'a> System<'a> for UpdateCameraSystem {
 
-    type SystemData = ( Option<Write<'a, Scene<Backend>>>, ReadStorage<'a, ActiveCamera>, ReadStorage<'a, Position>, ReadStorage<'a, Rotation>);
+    type SystemData = ( Option<Write<'a, Scene<Backend>>>, ReadStorage<'a, ActiveCamera>, ReadStorage<'a, Transform>);
 
-     fn run(&mut self, (mut scene, active_camera, position, rotation): Self::SystemData) {
+     fn run(&mut self, (mut scene, active_camera, transform): Self::SystemData) {
          
          let mut camera_already_updated = false;
-         for (_, position, rotation) in (&active_camera, &position, &rotation).join() {
+         for (_, transform) in (&active_camera, &transform).join() {
             match &mut scene {
                 Some(scene) => {
                     if camera_already_updated { println!("ERROR: Multiple Active Cameras found"); }
 
-                    scene.camera_data.position = position.0;
-                    let forward_vec = glm::quat_rotate_vec3(rotation, &glm::vec3(0.0, 0.0, 1.0));
-                    let up_vec      = glm::quat_rotate_vec3(rotation, &glm::vec3(0.0, 1.0, 0.0));
-                    scene.camera_data.target = position.0 + forward_vec;
+                    scene.camera_data.position = transform.position;
+                    let forward_vec = glm::quat_rotate_vec3(&transform.rotation, &glm::vec3(0.0, 0.0, 1.0));
+                    let up_vec      = glm::quat_rotate_vec3(&transform.rotation, &glm::vec3(0.0, 1.0, 0.0));
+                    scene.camera_data.target = transform.position + forward_vec;
                     scene.camera_data.up     = up_vec;
                     camera_already_updated = true;
                 }

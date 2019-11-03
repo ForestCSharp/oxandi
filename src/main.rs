@@ -86,6 +86,7 @@ lazy_static::lazy_static! {
 static WIDTH : f64 = 1280.0;
 static HEIGHT : f64 = 720.0;
 
+//TODO: REMOVE and just extract directly from component data
 pub struct CameraRenderData {
     pub position : glm::Vec3,
     pub target   : glm::Vec3,
@@ -105,6 +106,7 @@ impl CameraRenderData {
 pub struct Scene<B: hal::Backend> {
     pub specs_world : Arc<RwLock<World>>,
     pub camera_data : CameraRenderData,
+    pub frames_in_flight : u32,
     pub phantom: std::marker::PhantomData<B>,
 }
 
@@ -118,12 +120,6 @@ struct UniformData {
 
 #[derive(Debug, Default)]
 struct BasicRenderPipelineDesc;
-
-#[derive(Debug)]
-struct BasicRenderPipeline<B: hal::Backend> {
-    sets: Vec<Escape<DescriptorSet<B>>>,
-    uniform_buffers: Vec<Escape<Buffer<B>>>,
-}
 
 impl<B> SimpleGraphicsPipelineDesc<B, Scene<B>> for BasicRenderPipelineDesc
 where
@@ -170,59 +166,29 @@ where
         ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         _queue: QueueId,
-        _scene : &Scene<B>,
+        scene : &Scene<B>,
         buffers: Vec<NodeBuffer>,
         images: Vec<NodeImage>,
         set_layouts: &[Handle<DescriptorSetLayout<B>>],
     ) -> Result<BasicRenderPipeline<B>, failure::Error> {
-        assert!(buffers.is_empty());
-        assert!(images.is_empty());
-        assert!(set_layouts.len() > 0);
-
-        let uniform_size = std::mem::size_of::<UniformData>() as u64;
-        let mut uniform_buffers = Vec::new();
-
-        //TODO: make hashmap for desc sets / uni buffers and hash by GpuMesh
-        let mut sets = Vec::new();
-        for index in 0..ctx.frames_in_flight as usize {
-            uniform_buffers.push(factory
-                .create_buffer(
-                    BufferInfo {
-                        size: uniform_size,
-                        usage: hal::buffer::Usage::UNIFORM,
-                    },
-                    Dynamic,
-                )
-                .unwrap()
-            );
-
-            sets.push( unsafe {
-                let set = factory
-                    .create_descriptor_set(set_layouts[0].clone())
-                    .unwrap();
-                factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
-                    set: set.raw(),
-                    binding: 0,
-                    array_offset: 0,
-                    descriptors: Some(hal::pso::Descriptor::Buffer(
-                        uniform_buffers[index].raw(),
-                        Some(0) .. Some(uniform_size)
-                    )),
-                }));
-                set
-            });
-        }
-
-        println!("Building");
-
         Ok(BasicRenderPipeline{
-            sets: sets,
-            uniform_buffers : uniform_buffers,
+            mesh_data : HashMap::new(),
         })
     }
 }
 
 static mut ROTATION : f32 = 0.0f32;
+
+#[derive(Debug, Default)]
+struct BasicRenderPipelineMeshData<B: hal::Backend> {
+    pub descriptor_sets : Vec<Escape<DescriptorSet<B>>>, //1 per frame in flight
+    pub mvp_uniform_buffers : Vec<Escape<Buffer<B>>>, //1 per frame in flight
+}
+
+#[derive(Debug)]
+struct BasicRenderPipeline<B: hal::Backend> {
+    mesh_data : HashMap<u32, BasicRenderPipelineMeshData<B>>,
+}
 
 impl<B> SimpleGraphicsPipeline<B, Scene<B>> for BasicRenderPipeline<B>
 where
@@ -234,35 +200,95 @@ where
         &mut self,
         factory: &Factory<B>,
         _queue: QueueId,
-        _set_layouts: &[Handle<DescriptorSetLayout<B>>],
+        set_layouts: &[Handle<DescriptorSetLayout<B>>],
         index: usize,
         scene : &Scene<B>,
     ) -> PrepareResult {
-        //Update Uniform Data (offset based on current frame in flight index)
-        unsafe {
-            ROTATION = ROTATION + 0.01f32;
+        assert!(set_layouts.len() > 0);
 
-            let mut perspective_matrix = glm::perspective_zo(
-                WIDTH as f32 / HEIGHT as f32,
-                degrees_to_radians(90.0f32),
-                100000.0,
-                0.01
-            );
-            perspective_matrix[(1,1)] *= -1.0;
+        let specs_world = scene.specs_world.read().expect("Failed to read from scene.specs_world RwLock");
+        let specs_entities = specs_world.entities();
+        let specs_meshes = specs_world.read_storage::<MeshComponent<B>>();
+        let specs_transforms = specs_world.read_storage::<Transform>();
 
-            factory.upload_visible_buffer(
-                &mut self.uniform_buffers[index], //access correct uni buffer
-                0, 
-                &[UniformData {
-                    model_matrix :  glm::rotate_y(&glm::Mat4::identity(), ROTATION),
-                    view_matrix  :  glm::look_at(
-                                        &scene.camera_data.position,
-                                        &scene.camera_data.target,
-                                        &scene.camera_data.up,
-                                    ),
-                    proj_matrix  :  perspective_matrix.into(),
-                }]
-            ).unwrap();
+        for (entity, mesh, transform) in (&specs_entities, &specs_meshes, &specs_transforms).join() {
+            let id = entity.id();
+            if !self.mesh_data.contains_key(&id) {
+                let uniform_size = std::mem::size_of::<UniformData>() as u64;
+
+                let mut uniform_buffers = Vec::with_capacity(scene.frames_in_flight as usize);
+                let mut sets = Vec::with_capacity(scene.frames_in_flight as usize);
+
+                for index in 0..scene.frames_in_flight as usize {
+                    uniform_buffers.push(factory
+                        .create_buffer(
+                            BufferInfo {
+                                size: uniform_size,
+                                usage: hal::buffer::Usage::UNIFORM,
+                            },
+                            Dynamic,
+                        )
+                        .unwrap()
+                    );
+
+                    sets.push( unsafe {
+                        let set = factory
+                            .create_descriptor_set(set_layouts[0].clone())
+                            .unwrap();
+                        factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
+                            set: set.raw(),
+                            binding: 0,
+                            array_offset: 0,
+                            descriptors: Some(hal::pso::Descriptor::Buffer(
+                                uniform_buffers[index].raw(),
+                                Some(0) .. Some(uniform_size)
+                            )),
+                        }));
+                        set
+                    });     
+                }
+
+                self.mesh_data.insert(id, BasicRenderPipelineMeshData {
+                    descriptor_sets : sets,
+                    mvp_uniform_buffers : uniform_buffers,
+                });
+            }
+
+            if let Some(mut mesh_data) = self.mesh_data.get_mut(&entity.id()) {
+                unsafe {
+                    ROTATION = ROTATION + 0.01f32;
+
+                    let model_matrix = {
+                        let mut model_matrix = glm::identity();
+                        //TODO: Scale
+                        //TODO: Rotation
+                        model_matrix = glm::translate(&model_matrix, &transform.position);
+                        model_matrix
+                    };
+
+                    let mut perspective_matrix = glm::perspective_zo(
+                        WIDTH as f32 / HEIGHT as f32,
+                        degrees_to_radians(90.0f32),
+                        100000.0,
+                        0.01
+                    );
+                    perspective_matrix[(1,1)] *= -1.0;
+
+                    factory.upload_visible_buffer(
+                        &mut mesh_data.mvp_uniform_buffers[index], //access correct uni buffer
+                        0, 
+                        &[UniformData {
+                            model_matrix :  model_matrix,
+                            view_matrix  :  glm::look_at(
+                                                &scene.camera_data.position,
+                                                &scene.camera_data.target,
+                                                &scene.camera_data.up,
+                                            ),
+                            proj_matrix  :  perspective_matrix.into(),
+                        }]
+                    ).unwrap();
+                }
+            }
         }
 
         /* Alternatively, DrawReuse only records command buffers once, useful when rendered items never changes 
@@ -279,19 +305,21 @@ where
     ) {
         unsafe {
             let specs_world = scene.specs_world.read().expect("Failed to read from scene.specs_world RwLock");
+            let specs_entities = specs_world.entities();
             let specs_mesh_storage = specs_world.read_storage::<MeshComponent<B>>();
+            for (entity, mesh) in (&specs_entities, &specs_mesh_storage).join() {
+                if let Some(mesh_data) = self.mesh_data.get(&entity.id()) {
+                    encoder.bind_graphics_descriptor_sets(
+                        layout,
+                        0,
+                        Some(mesh_data.descriptor_sets[index].raw()),
+                        std::iter::empty(),
+                    );
 
-            for mesh in specs_mesh_storage.join() {
-                encoder.bind_graphics_descriptor_sets(
-                    layout,
-                    0,
-                    Some(self.sets[index].raw()),
-                    std::iter::empty(),
-                ); //FIXME: create and store sets for each mesh
-
-                encoder.bind_vertex_buffers(0, Some((mesh.vertex_buffer.raw(), 0)));
-                encoder.bind_index_buffer(mesh.index_buffer.raw(), 0, hal::IndexType::U32);
-                encoder.draw_indexed(0..mesh.num_indices, 0, 0..1);
+                    encoder.bind_vertex_buffers(0, Some((mesh.vertex_buffer.raw(), 0)));
+                    encoder.bind_index_buffer(mesh.index_buffer.raw(), 0, hal::IndexType::U32);
+                    encoder.draw_indexed(0..mesh.num_indices, 0, 0..1);
+                }
             }
         }
     }
@@ -373,6 +401,7 @@ fn main() {
     let mut scene = Scene {
         specs_world : specs_world.clone(),
         camera_data : CameraRenderData::new(),
+        frames_in_flight : frames_in_flight_count,
         phantom : std::marker::PhantomData,
     };
 
@@ -398,16 +427,16 @@ fn main() {
         specs_world.insert(DeltaTime(0.05)); //add a resource
         specs_world.insert(InputState::new());
         specs_world.insert(scene);
-        specs_world.create_entity().with(Velocity(glm::vec3(2.0, 1.0, 3.0))).with(Position(glm::vec3(1.0, 2.0, 3.0))).build();
-        specs_world.create_entity().with(Velocity(glm::vec3(200.0, 100.0, 300.0))).with(Position(glm::vec3(1.0, 2.0, 3.0))).build();
+        specs_world.create_entity().with(Velocity(glm::vec3(2.0, 1.0, 3.0))).with(Transform::new()).build();
+        specs_world.create_entity().with(Velocity(glm::vec3(200.0, 100.0, 300.0))).with(Transform::new()).build();
 
         specs_world.register::<MeshComponent<Backend>>(); //FIXME: can remove this once a system using MeshComponent is hooked up to world
-        specs_world.create_entity().with(Position(glm::vec3(0.0, 0.0, 0.0))).with(MeshComponent::new(&mut factory)).build();
+        specs_world.create_entity().with(Transform::new()).with(MeshComponent::new(&mut factory)).build();
+        specs_world.create_entity().with(Transform::new()).with(Velocity(glm::vec3(0.5, 0.0, 0.0))).with(MeshComponent::new(&mut factory)).build();
         
         //Camera
         specs_world.create_entity()
-            .with(Position(glm::vec3(0.0, 0.0, -1.0)))
-            .with(Rotation(glm::quat(0.0, 1.0, 0.0, 0.0)))
+            .with(Transform::new())
             .with(Velocity(glm::vec3(0.0, 0.0, 0.0)))
             .with(Acceleration(glm::vec3(0.0, 0.0, 0.0)))
             .with(Drag(10.0))
@@ -417,11 +446,11 @@ fn main() {
         
         specs_world.create_entity()
             .with(Velocity(glm::vec3(2.0, 1.0, 3.0)))
-            .with(Position(glm::vec3(1.0, 2.0, 3.0)))
+            .with(Transform::new())
             .with(Acceleration(glm::vec3(2.0, 1.0, 2.0)))
             .build();
 
-        specs_world.create_entity().with(Position(glm::Vec3::new(1.0, 2.0, 3.0))).build();
+        specs_world.create_entity().with(Transform::new()).build();
     }
 
     fn dispatch_world(dispatcher: Arc<RwLock<specs::Dispatcher>>, world : Arc<RwLock<specs::World>>) {
@@ -520,6 +549,7 @@ fn main() {
         let specs_world = specs_world.read().unwrap();
         let mut scene = specs_world.write_resource::<Scene<Backend>>();
         graph.dispose(&mut factory, &mut scene);
+        //TODO: cleanup mesh vertex/index buffers?
     }
 }
 

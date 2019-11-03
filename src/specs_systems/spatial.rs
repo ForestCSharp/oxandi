@@ -2,11 +2,22 @@ use specs::prelude::*;
 
 use crate::DeltaTime;
 
-#[derive(Debug, Component, Deref, DerefMut)]
-pub struct Position(pub glm::Vec3);
+#[derive(Debug, Component)]
+pub struct Transform {
+    pub position : glm::Vec3,
+    pub rotation : glm::Quat,
+    pub scale    : glm::Vec3,
+}
 
-#[derive(Debug, Component, Deref, DerefMut)]
-pub struct Rotation(pub glm::Quat);
+impl Transform {
+    pub fn new() -> Transform {
+        Transform {
+            position : glm::vec3(0.0, 0.0, 0.0),
+            rotation : glm::quat(0.0, 1.0, 0.0, 0.0),
+            scale    : glm::vec3(1.0, 1.0, 1.0),
+        }
+    }
+}
 
 #[derive(Debug, Component, Deref, DerefMut)]
 pub struct Velocity(pub glm::Vec3);
@@ -22,20 +33,16 @@ pub struct UpdatePositionSystem;
 impl<'a> System<'a> for UpdatePositionSystem {
 
     type SystemData = ( Read<'a, DeltaTime>, 
-                        WriteStorage<'a, Position>, 
+                        WriteStorage<'a, Transform>, 
                         ReadStorage<'a, Velocity>
                       );
 
-    fn run(&mut self, (dt, mut positions, velocities): Self::SystemData) {
- 
-        //Testing inserting entities
-        // let new_entity = entities.create(); //
-        // positions.insert(new_entity, positions(glm::vec3(0.,0.,0.))));
+    fn run(&mut self, (dt, mut transforms, velocities): Self::SystemData) {
 
-        (&velocities, &mut positions)
+        (&velocities, &mut transforms)
         .par_join()
-        .for_each(|(vel, pos)| {
-            pos.0 += vel.0 * dt.0;
+        .for_each(|(vel, transform)| {
+            transform.position += vel.0 * dt.0;
         });
     }
 }
