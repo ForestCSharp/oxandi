@@ -91,6 +91,8 @@ impl<'a> System<'a> for UpdateRotationSystem {
         .par_join()
         .for_each(|(angular_velocity, transform)| {
             let desired_rotation = glm::quat_normalize(&(transform.rotation * angular_velocity.0));
+            //FIXME: higher angular velocity slows the slerp down, as the two rotations are farther apart so the dt.0 doesn't lerp as far
+            //TODO: Scale Slerp by 
             transform.rotation = glm::quat_slerp(&transform.rotation, &desired_rotation, dt.0);
         });
     }
