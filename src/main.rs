@@ -31,7 +31,7 @@ use rendy::{
     graph::{
         present::PresentNode, render::*, GraphBuilder, GraphContext, NodeBuffer, NodeImage,
     },
-    hal::{self, Device as _},
+    hal::{self, Device as _, window::PresentMode},
     memory::Dynamic,
     mesh::PosColor,
     resource::{Buffer, BufferInfo, DescriptorSet, DescriptorSetLayout, Escape, Handle},
@@ -264,7 +264,7 @@ where
                         let mut model_matrix = glm::identity();
                         model_matrix = glm::translate(&model_matrix, &transform.position);
                         model_matrix *= glm::quat_to_mat4(&transform.rotation);
-                        //TODO: Scale
+                        model_matrix *= glm::scale(&glm::identity(), &transform.scale);
                         model_matrix
                     };
 
@@ -305,12 +305,12 @@ where
         index: usize,
         scene : &Scene<B>,
     ) {
-        unsafe {
-            let specs_world = scene.specs_world.read().expect("Failed to read from scene.specs_world RwLock");
-            let specs_entities = specs_world.entities();
-            let specs_mesh_storage = specs_world.read_storage::<MeshComponent<B>>();
-            for (entity, mesh) in (&specs_entities, &specs_mesh_storage).join() {
-                if let Some(mesh_data) = self.mesh_data.get(&entity.id()) {
+        let specs_world = scene.specs_world.read().expect("Failed to read from scene.specs_world RwLock");
+        let specs_entities = specs_world.entities();
+        let specs_mesh_storage = specs_world.read_storage::<MeshComponent<B>>();
+        for (entity, mesh) in (&specs_entities, &specs_mesh_storage).join() {
+            if let Some(mesh_data) = self.mesh_data.get(&entity.id()) {
+                unsafe {
                     encoder.bind_graphics_descriptor_sets(
                         layout,
                         0,
@@ -391,7 +391,15 @@ fn main() {
             .into_pass(),
     );
 
-    let present_pass = PresentNode::builder(&factory, surface, color).with_dependency(basic_pass);
+    fn present_mode_priority(mode : PresentMode) -> Option<usize> {
+        match mode {
+            PresentMode::Mailbox => Some(0),
+            _ => None,
+        }        
+    }
+
+    let present_pass = PresentNode::builder(&factory, surface, color).with_dependency(basic_pass).with_present_modes_priority(present_mode_priority);
+    println!("present mode: {:?}", present_pass.present_mode());
 
     let frames_in_flight_count = present_pass.image_count();
 
@@ -440,7 +448,7 @@ fn main() {
             .with(MeshComponent::new(&mut factory))
             .with(Transform::new())
             .with(Velocity(glm::vec3(0.5, 0.0, 0.0)))
-            .with(AngularVelocity(glm::quat(0.0, 1.0, 1.0, 5.0)))
+            .with(AngularVelocity(glm::quat(0.0, 1.0, 1.0, 0.3)))
             .build();
         
         //Camera

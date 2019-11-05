@@ -5,7 +5,6 @@ authors = ["Forest Sharp <forestcollinssharp@gmail.com>"]
 edition = "2018"
 
 [features]
-default = ["rendy", "vulkan"]
 vulkan = ["rendy/vulkan"]
 dx12 = ["rendy/dx12"]
 metal = ["rendy/metal"]

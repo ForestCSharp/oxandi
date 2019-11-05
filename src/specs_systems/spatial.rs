@@ -14,7 +14,7 @@ impl Transform {
         Transform {
             position : glm::vec3(0.0, 0.0, 0.0),
             rotation : glm::quat(0.0, 1.0, 0.0, 0.0),
-            scale    : glm::vec3(1.0, 1.0, 1.0),
+            scale    : glm::vec3(1.0, 4.0, 1.0),
         }
     }
 }
@@ -90,9 +90,8 @@ impl<'a> System<'a> for UpdateRotationSystem {
         (&angular_velocities, &mut transforms)
         .par_join()
         .for_each(|(angular_velocity, transform)| {
-            let mut scaled_angular_velocity = angular_velocity.0;
-            scaled_angular_velocity.w *= dt.0;
-            transform.rotation = glm::quat_normalize(&(transform.rotation * scaled_angular_velocity));
+            let desired_rotation = glm::quat_normalize(&(transform.rotation * angular_velocity.0));
+            transform.rotation = glm::quat_slerp(&transform.rotation, &desired_rotation, dt.0);
         });
     }
 }
