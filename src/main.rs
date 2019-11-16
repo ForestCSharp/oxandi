@@ -337,10 +337,27 @@ use gltf_loader::*;
 
 #[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
 fn main() {
+
     env_logger::Builder::from_default_env()
-        .init();
+    .init();
 
     let gltf_model = GltfModel::new("data/models/Running.glb");
+
+    //Specs setup
+    let specs_world = Arc::new(RwLock::new(World::new()));
+
+    let specs_dispatcher = {
+        let mut dispatcher = DispatcherBuilder::new()
+            .with(InputMovementSystem, "input_movement_system", &[])
+            .with(UpdateVelocitySystem, "acceleration_system", &[])
+            .with(UpdatePositionSystem, "update_position_system", &["input_movement_system", "acceleration_system"])
+            .with(UpdateRotationSystem, "update_rotation_system", &["input_movement_system"])
+            .with(UpdateCameraSystem, "update_camera_system", &["input_movement_system"])
+        .build();
+        //NOTE: has to be done before creating entities in world (seems problematic)
+        dispatcher.setup(&mut specs_world.write().unwrap());
+        Arc::new(RwLock::new(dispatcher))
+    };
 
     let config: Config = Default::default();
 
@@ -356,16 +373,16 @@ fn main() {
 
     event_loop.poll_events(|_| ());
 
-    let surface = factory.create_surface(&window);
-
-    let mut graph_builder = GraphBuilder::<Backend, Scene<Backend>>::new();
-
     let size = window
         .get_inner_size()
         .unwrap()
         .to_physical(window.get_hidpi_factor());
 
     let window_kind = hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1);
+
+    let surface = factory.create_surface(&window);
+
+    let mut graph_builder = GraphBuilder::<Backend, Scene<Backend>>::new();
 
     let color = graph_builder.create_image(
         window_kind,
@@ -393,20 +410,20 @@ fn main() {
 
     fn present_mode_priority(mode : PresentMode) -> Option<usize> {
         match mode {
-            PresentMode::Mailbox => Some(0),
-            _ => None,
+            PresentMode::Mailbox => Some(1),
+            _ => Some(0),
         }        
     }
 
-    let present_pass = PresentNode::builder(&factory, surface, color).with_dependency(basic_pass).with_present_modes_priority(present_mode_priority);
+    let present_pass = PresentNode::builder(&factory, surface, color)
+        .with_dependency(basic_pass)
+        .with_present_modes_priority(present_mode_priority);
+    
     println!("present mode: {:?}", present_pass.present_mode());
 
     let frames_in_flight_count = present_pass.image_count();
 
     graph_builder.add_node(present_pass);
-
-    //Specs setup
-    let specs_world = Arc::new(RwLock::new(World::new()));
 
     let mut scene = Scene {
         specs_world : specs_world.clone(),
@@ -419,19 +436,6 @@ fn main() {
         .with_frames_in_flight(frames_in_flight_count)
         .build(&mut factory, &mut families, &mut scene)
         .unwrap();
-    
-    let specs_dispatcher = {
-        let mut dispatcher = DispatcherBuilder::new()
-            .with(InputMovementSystem, "input_movement_system", &[])
-            .with(UpdateVelocitySystem, "acceleration_system", &[])
-            .with(UpdatePositionSystem, "update_position_system", &["input_movement_system", "acceleration_system"])
-            .with(UpdateRotationSystem, "update_rotation_system", &["input_movement_system"])
-            .with(UpdateCameraSystem, "update_camera_system", &["input_movement_system"])
-        .build();
-        //NOTE: has to be done before creating entities in world (seems problematic)
-        dispatcher.setup(&mut specs_world.write().unwrap());
-        Arc::new(RwLock::new(dispatcher))
-    };
 
     {
         let mut specs_world = specs_world.write().unwrap();
