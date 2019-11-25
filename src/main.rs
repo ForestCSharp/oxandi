@@ -28,16 +28,19 @@ extern crate derive_deref;
 use rendy::{
     command::{QueueId, RenderPassEncoder},
     factory::{Config, Factory},
-    graph::{
-        present::PresentNode, render::*, GraphBuilder, GraphContext, NodeBuffer, NodeImage,
-    },
-    hal::{self, Device as _, window::PresentMode},
+    graph::{render::*, GraphBuilder, GraphContext, NodeBuffer, NodeImage},
+    hal::{self, device::Device as _, window::PresentMode},
     memory::Dynamic,
     mesh::PosColor,
     resource::{Buffer, BufferInfo, DescriptorSet, DescriptorSetLayout, Escape, Handle},
     shader::{ShaderKind, SourceLanguage, PathBufShaderInfo, ShaderSet, SpirvReflection},
-    wsi::winit::{EventsLoop, WindowBuilder, dpi, VirtualKeyCode},
-    wsi::winit as winit,
+    init::winit::{
+            event::{Event, WindowEvent, DeviceEvent, VirtualKeyCode},
+            event_loop::{ControlFlow, EventLoop},
+            window::WindowBuilder,
+        },
+    init::winit,
+    init::AnyWindowedRendy,
 };
 
 extern crate nalgebra_glm as glm;
@@ -119,6 +122,31 @@ struct UniformData {
 }
 
 #[derive(Debug, Default)]
+struct BasicRenderGroupDesc;
+
+impl<B,T> RenderGroupDesc<B,T> for BasicRenderGroupDesc
+    where
+        B: hal::Backend,
+        T: ?Sized,
+{
+     fn build<'a>(
+        self,
+        ctx: &GraphContext<B>,
+        factory: &mut Factory<B>,
+        queue: QueueId,
+        aux: &T,
+        framebuffer_width: u32,
+        framebuffer_height: u32,
+        subpass: hal::pass::Subpass<'_, B>,
+        buffers: Vec<NodeBuffer>,
+        images: Vec<NodeImage>,
+    ) -> Result<Box<dyn RenderGroup<B, T>>, hal::pso::CreationError> {
+
+        return Err(hal::pso::CreationError::Other);
+    }
+}
+
+#[derive(Debug, Default)]
 struct BasicRenderPipelineDesc;
 
 impl<B> SimpleGraphicsPipelineDesc<B, Scene<B>> for BasicRenderPipelineDesc
@@ -170,7 +198,7 @@ where
         buffers: Vec<NodeBuffer>,
         images: Vec<NodeImage>,
         set_layouts: &[Handle<DescriptorSetLayout<B>>],
-    ) -> Result<BasicRenderPipeline<B>, failure::Error> {
+    ) -> Result<BasicRenderPipeline<B>, hal::pso::CreationError> {
         Ok(BasicRenderPipeline{
             mesh_data : HashMap::new(),
         })
@@ -361,217 +389,254 @@ fn main() {
 
     let config: Config = Default::default();
 
-    let (mut factory, mut families): (Factory<Backend>, _) = rendy::factory::init(config).unwrap();
+    let mut event_loop = EventLoop::new();
 
-    let mut event_loop = EventsLoop::new();
-
-    let window = WindowBuilder::new()
+    let window_builder = WindowBuilder::new()
         .with_title("Oxandi")
-        .with_dimensions(dpi::LogicalSize::new(WIDTH, HEIGHT))
-        .build(&event_loop)
-        .unwrap();
+        .with_inner_size((960, 640).into())
+        .with_title("Oxandi");
 
-    event_loop.poll_events(|_| ());
+    let rendy = AnyWindowedRendy::init_auto(&config, window_builder, &event_loop).unwrap();
+    rendy::with_any_windowed_rendy!((rendy)
+        (mut factory, mut families, surface, window) => {
+            let mut graph_builder = GraphBuilder::<_, Scene<Backend>>::new();
 
-    let size = window
-        .get_inner_size()
-        .unwrap()
-        .to_physical(window.get_hidpi_factor());
+            let mut size = window.inner_size().to_physical(window.hidpi_factor());
+            let window_kind = hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1);
 
-    let window_kind = hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1);
+            let depth = graph_builder.create_image(
+                window_kind,
+                1,
+                hal::format::Format::D16Unorm,
+                Some(hal::command::ClearValue{
+                    depth_stencil : hal::command::ClearDepthStencil{depth: 0.0, stencil: 0},
+                }),
+            );
 
-    let surface = factory.create_surface(&window);
-
-    let mut graph_builder = GraphBuilder::<Backend, Scene<Backend>>::new();
-
-    let color = graph_builder.create_image(
-        window_kind,
-        1,
-        factory.get_surface_format(&surface),
-        Some(hal::command::ClearValue::Color([1.0, 1.0, 1.0, 1.0].into())),
-    );
-
-    let depth = graph_builder.create_image(
-        window_kind,
-        1,
-        hal::format::Format::D16Unorm,
-        Some(hal::command::ClearValue::DepthStencil(
-            hal::command::ClearDepthStencil(0.0, 0),
-        )),
-    );
-
-    let basic_pass = graph_builder.add_node(
-        BasicRenderPipeline::builder()
-            .into_subpass()
-            .with_color(color)
-            .with_depth_stencil(depth)
-            .into_pass(),
-    );
-
-    fn present_mode_priority(mode : PresentMode) -> Option<usize> {
-        match mode {
-            PresentMode::Mailbox => Some(1),
-            _ => Some(0),
-        }        
-    }
-
-    let present_pass = PresentNode::builder(&factory, surface, color)
-        .with_dependency(basic_pass)
-        .with_present_modes_priority(present_mode_priority);
-    
-    println!("present mode: {:?}", present_pass.present_mode());
-
-    let frames_in_flight_count = present_pass.image_count();
-
-    graph_builder.add_node(present_pass);
-
-    let mut scene = Scene {
-        specs_world : specs_world.clone(),
-        camera_data : CameraRenderData::new(),
-        frames_in_flight : frames_in_flight_count,
-        phantom : std::marker::PhantomData,
-    };
-
-    let mut graph = graph_builder
-        .with_frames_in_flight(frames_in_flight_count)
-        .build(&mut factory, &mut families, &mut scene)
-        .unwrap();
-
-    {
-        let mut specs_world = specs_world.write().unwrap();
-        specs_world.insert(DeltaTime(0.05)); //add a resource
-        specs_world.insert(InputState::new());
-        specs_world.insert(scene);
-        specs_world.create_entity().with(Velocity(glm::vec3(2.0, 1.0, 3.0))).with(Transform::new()).build();
-        specs_world.create_entity().with(Velocity(glm::vec3(200.0, 100.0, 300.0))).with(Transform::new()).build();
-
-        specs_world.register::<MeshComponent<Backend>>(); //FIXME: can remove this once a system using MeshComponent is hooked up to world
-        specs_world.create_entity().with(Transform::new()).with(MeshComponent::new(&mut factory)).build();
-        
-        specs_world.create_entity()
-            .with(MeshComponent::new(&mut factory))
-            .with(Transform::new())
-            .with(Velocity(glm::vec3(0.5, 0.0, 0.0)))
-            .with(AngularVelocity(glm::quat(0.0, 1.0, 1.0, 0.3)))
-            .build();
-        
-        //Camera
-        specs_world.create_entity()
-            .with(Transform::new())
-            .with(Velocity(glm::vec3(0.0, 0.0, 0.0)))
-            .with(Acceleration(glm::vec3(0.0, 0.0, 0.0)))
-            .with(Drag(10.0))
-            .with(InputComponent { move_speed : 20.0 })
-            .with(ActiveCamera)
-            .build();
-        
-        specs_world.create_entity()
-            .with(Velocity(glm::vec3(2.0, 1.0, 3.0)))
-            .with(Transform::new())
-            .with(Acceleration(glm::vec3(2.0, 1.0, 2.0)))
-            .build();
-
-        specs_world.create_entity().with(Transform::new()).build();
-    }
-
-    fn dispatch_world(dispatcher: Arc<RwLock<specs::Dispatcher>>, world : Arc<RwLock<specs::World>>) {
-        dispatcher.write().unwrap().dispatch_par(&world.read().unwrap());
-    }
-
-    let mut rhai_engine = rhai::Engine::new();
-    rhai_engine.register_fn("dispatch_world", dispatch_world);
-    rhai_engine.register_type::<Arc<RwLock<specs::Dispatcher>>>();
-    rhai_engine.register_type::<Arc<RwLock<specs::World>>>();
-   
-    let mut scope = Scope::new();
-    scope.push(("dispatcher".to_string(), Box::new(specs_dispatcher.clone())));
-    scope.push(("world". to_string(), Box::new(specs_world.clone())));
-
-    let mut delta_time = Instant::now();
-
-    loop {
-
-        //Execute Rhai Script
-        rhai_engine.eval_with_scope::<()>(&mut scope, "dispatch_world(dispatcher, world)").expect("Failed to run rhai code");
-
-        let mut should_close = false;
-        let mut new_delta = (0., 0.);
-        event_loop.poll_events(|event| {
-            match event {
-                winit::Event::WindowEvent{window_id : _, event} => {
-                    match event {
-                        winit::WindowEvent::CloseRequested => {
-                            should_close = true;
+            graph_builder.add_node(
+                BasicRenderPipeline::builder()
+                    .into_subpass()
+                    .with_color_surface()
+                    .with_depth_stencil(depth)
+                    .into_pass()
+                    .with_surface(
+                        surface,
+                        hal::window::Extent2D {
+                            width: size.width as _,
+                            height: size.height as _,
                         },
-                        winit::WindowEvent::KeyboardInput { device_id : _, input } => {
-                            match input.virtual_keycode {
-                                Some(keycode) => {
-                                    let specs_world = specs_world.read().unwrap();
-                                    specs_world.write_resource::<InputState>().key_states.insert(keycode, input.state == winit::ElementState::Pressed);
+                        Some(hal::command::ClearValue {
+                            color: hal::command::ClearColor {
+                                float32: [1.0, 1.0, 1.0, 1.0],
+                            },
+                        }
+                    ),
+                ),
+            );
 
-                                    match keycode {
-                                        VirtualKeyCode::Escape => should_close = true,
-                                        _ => {},
-                                    }
-                                },
-                                _ => {},
-                            }
-                        },
-                        winit::WindowEvent::MouseInput { state, button, ..} => {
-                            let pressed = state == winit::ElementState::Pressed;
-                            let specs_world = specs_world.read().unwrap();
-                            let mouse_button_states = &mut specs_world.write_resource::<InputState>().mouse_button_states;
-                            match button {
-                                winit::MouseButton::Left   => mouse_button_states[0] = pressed,
-                                winit::MouseButton::Right  => mouse_button_states[1] = pressed,
-                                winit::MouseButton::Middle => mouse_button_states[2] = pressed,
-                                winit::MouseButton::Other(idx) => {
-                                    if (idx as usize) < mouse_button_states.len() {
-                                        mouse_button_states[idx as usize] = pressed;
+            let mut scene = Scene {
+                specs_world : specs_world.clone(),
+                camera_data : CameraRenderData::new(),
+                frames_in_flight : 4,
+                phantom : std::marker::PhantomData,
+            };
+
+            let mut graph = graph_builder
+                .build(&mut factory, &mut families, &scene)
+                .unwrap();
+
+            {
+                let mut specs_world = specs_world.write().unwrap();
+                specs_world.insert(DeltaTime(0.05)); //add a resource
+                specs_world.insert(InputState::new());
+                specs_world.insert(scene);
+                specs_world.create_entity().with(Velocity(glm::vec3(2.0, 1.0, 3.0))).with(Transform::new()).build();
+                specs_world.create_entity().with(Velocity(glm::vec3(200.0, 100.0, 300.0))).with(Transform::new()).build();
+
+                specs_world.register::<MeshComponent<Backend>>(); //FIXME: can remove this once a system using MeshComponent is hooked up to world
+                specs_world.create_entity().with(Transform::new()).with(MeshComponent::new(&mut factory)).build();
+                
+                specs_world.create_entity()
+                    .with(MeshComponent::new(&mut factory))
+                    .with(Transform::new())
+                    .with(Velocity(glm::vec3(0.5, 0.0, 0.0)))
+                    .with(AngularVelocity(glm::quat(0.0, 1.0, 1.0, 0.3)))
+                    .build();
+                
+                //Camera
+                specs_world.create_entity()
+                    .with(Transform::new())
+                    .with(Velocity(glm::vec3(0.0, 0.0, 0.0)))
+                    .with(Acceleration(glm::vec3(0.0, 0.0, 0.0)))
+                    .with(Drag(10.0))
+                    .with(InputComponent { move_speed : 20.0 })
+                    .with(ActiveCamera)
+                    .build();
+                
+                specs_world.create_entity()
+                    .with(Velocity(glm::vec3(2.0, 1.0, 3.0)))
+                    .with(Transform::new())
+                    .with(Acceleration(glm::vec3(2.0, 1.0, 2.0)))
+                    .build();
+
+                specs_world.create_entity().with(Transform::new()).build();
+            }
+
+            fn dispatch_world(dispatcher: Arc<RwLock<specs::Dispatcher>>, world : Arc<RwLock<specs::World>>) {
+                dispatcher.write().unwrap().dispatch_par(&world.read().unwrap());
+            }
+
+            let mut rhai_engine = rhai::Engine::new();
+            rhai_engine.register_fn("dispatch_world", dispatch_world);
+            rhai_engine.register_type::<Arc<RwLock<specs::Dispatcher>>>();
+            rhai_engine.register_type::<Arc<RwLock<specs::World>>>();
+        
+            let mut scope = Scope::new();
+            scope.push(("dispatcher".to_string(), Box::new(specs_dispatcher.clone())));
+            scope.push(("world". to_string(), Box::new(specs_world.clone())));
+
+            let mut delta_time = Instant::now();
+            let mut new_delta = (0., 0.);
+            let mut needs_resize = false;
+
+            let mut graph = Some(graph);
+
+            event_loop.run(move |event, _, control_flow| {
+
+                match event {
+                    Event::WindowEvent { event, .. } => {
+                        match event { 
+                            WindowEvent::CloseRequested => { 
+                                *control_flow = ControlFlow::Exit;
+                            },
+                            WindowEvent::KeyboardInput { device_id : _, input } => {
+                                match input.virtual_keycode {
+                                    Some(keycode) => {
+                                        let specs_world = specs_world.read().unwrap();
+                                        specs_world.write_resource::<InputState>().key_states.insert(keycode, input.state == winit::event::ElementState::Pressed);
+
+                                        match keycode {
+                                            VirtualKeyCode::Escape => *control_flow = ControlFlow::Exit,
+                                            _ => {},
+                                        }
+                                    },
+                                    _ => {},
+                                }
+                            },
+                            WindowEvent::MouseInput { state, button, ..} => {
+                                let pressed = state == winit::event::ElementState::Pressed;
+                                let specs_world = specs_world.read().unwrap();
+                                let mouse_button_states = &mut specs_world.write_resource::<InputState>().mouse_button_states;
+                                match button {
+                                    winit::event::MouseButton::Left   => mouse_button_states[0] = pressed,
+                                    winit::event::MouseButton::Right  => mouse_button_states[1] = pressed,
+                                    winit::event::MouseButton::Middle => mouse_button_states[2] = pressed,
+                                    winit::event::MouseButton::Other(idx) => {
+                                        if (idx as usize) < mouse_button_states.len() {
+                                            mouse_button_states[idx as usize] = pressed;
+                                        }
                                     }
                                 }
+                            },
+                            WindowEvent::Resized(logical_size) => {
+                                println!("OldSize: {:?} New Size: {:?}", size, logical_size);
+                                needs_resize = true;
+                                size.width = logical_size.width;
+                                size.height = logical_size.height;
+                            },
+                            _ => {},
+                        }
+                    },
+                    Event::DeviceEvent { event, ..} => {
+                        match event {
+                            DeviceEvent::MouseMotion { delta } => {
+                                new_delta = (delta.0 as f32, delta.1 as f32);
+                            },
+                            _ => {},
+                        }
+                    },
+                    Event::EventsCleared => {
+
+                        if needs_resize {
+                            let specs_world = specs_world.read().unwrap();
+                            let mut scene = specs_world.write_resource::<Scene<Backend>>();
+                            
+                            if let Some(graph) = graph.take() {
+                                graph.dispose(&mut factory, &scene);
                             }
-                        },
-                        _ => {},
-                    }
-                },
-                winit::Event::DeviceEvent { event, ..} => {
-                    match event {
-                        winit::DeviceEvent::MouseMotion { delta } => {
-                            new_delta = (delta.0 as f32, delta.1 as f32);
-                        },
-                        _ => {},
+
+                            let new_surface = factory.create_surface(&window).expect("failed to create surface");
+
+                            let mut graph_builder = GraphBuilder::<_, Scene<Backend>>::new();
+                            let window_kind = hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1);
+
+                            let depth = graph_builder.create_image(
+                                window_kind,
+                                1,
+                                hal::format::Format::D16Unorm,
+                                Some(hal::command::ClearValue{
+                                    depth_stencil : hal::command::ClearDepthStencil{depth: 0.0, stencil: 0},
+                                }),
+                            );
+                
+                            graph_builder.add_node(
+                                BasicRenderPipeline::builder()
+                                    .into_subpass()
+                                    .with_color_surface()
+                                    .with_depth_stencil(depth)
+                                    .into_pass()
+                                    .with_surface(
+                                        new_surface,
+                                        hal::window::Extent2D {
+                                            width: size.width as _,
+                                            height: size.height as _,
+                                        },
+                                        Some(hal::command::ClearValue {
+                                            color: hal::command::ClearColor {
+                                                float32: [1.0, 1.0, 1.0, 1.0],
+                                            },
+                                        }
+                                    ),
+                                ),
+                            );
+
+                            graph = Some(graph_builder
+                                .build(&mut factory, &mut families, &scene)
+                                .unwrap());
+
+                            needs_resize = false;
+                        }
+
+                        let specs_world = specs_world.read().unwrap();
+                        
+                        specs_world.write_resource::<InputState>().mouse_delta = new_delta;
+                        new_delta = (0., 0.);
+
+                        *specs_world.write_resource::<DeltaTime>() = DeltaTime(delta_time.elapsed().as_secs_f32());
+                        delta_time = Instant::now();
+
+                        rhai_engine.eval_with_scope::<()>(&mut scope, "dispatch_world(dispatcher, world)").expect("Failed to run rhai code");
+
+                        let mut scene = specs_world.write_resource::<Scene<Backend>>();
+
+                        factory.maintain(&mut families);
+                        if let Some(ref mut graph) = graph {
+                            graph.run(&mut factory, &mut families, &scene);
+                        }
+                    },
+                    _ => {}
+                }
+
+                if *control_flow == ControlFlow::Exit {
+                    let specs_world = specs_world.read().unwrap();
+                    let mut scene = specs_world.write_resource::<Scene<Backend>>();
+                    if let Some(graph) = graph.take() {
+                        graph.dispose(&mut factory, &scene);
                     }
                 }
-                _ => {},
-            }
-        });
-
-        {
-            let specs_world = specs_world.read().unwrap();
-            *specs_world.write_resource::<DeltaTime>() = DeltaTime(delta_time.elapsed().as_secs_f32());
-            delta_time = Instant::now();
-            specs_world.write_resource::<InputState>().mouse_delta = new_delta;
+            });
         }
-
-        if should_close { break; }
-        
-        //TODO: Wrap in render system
-        factory.maintain(&mut families);
-        event_loop.poll_events(|_| ());
-        {
-            let specs_world = specs_world.read().unwrap();
-            let mut scene = specs_world.write_resource::<Scene<Backend>>();
-            graph.run(&mut factory, &mut families, &mut scene);
-        }
-    }
-
-    {
-        let specs_world = specs_world.read().unwrap();
-        let mut scene = specs_world.write_resource::<Scene<Backend>>();
-        graph.dispose(&mut factory, &mut scene);
-        //TODO: cleanup mesh vertex/index buffers?
-    }
+    );
 }
 
 #[cfg(not(any(feature = "dx12", feature = "metal", feature = "vulkan")))]

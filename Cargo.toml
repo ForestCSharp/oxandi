@@ -25,5 +25,5 @@ gltf = "0.14.0"
 
 [dependencies.rendy]
 optional = true
-version = "0.4"
-features = ["texture-image", "shader-compiler", "spirv-reflection"]
+version = "0.5.1"
+features = ["texture-image", "shader-compiler", "spirv-reflection", "init", "init-winit"]

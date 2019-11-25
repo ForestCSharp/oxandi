@@ -1,6 +1,6 @@
 use specs::prelude::*;
 
-use rendy::wsi::winit::VirtualKeyCode;
+use rendy::init::winit::event::VirtualKeyCode;
 use std::collections::HashMap;
 
 use crate::specs_systems::spatial::{Transform, Velocity};
