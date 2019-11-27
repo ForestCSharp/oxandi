@@ -26,7 +26,8 @@ macro_rules! map(
 extern crate derive_deref;
 
 use rendy::{
-    command::{QueueId, RenderPassEncoder},
+    wsi::Surface,
+    command::{QueueId, RenderPassEncoder, Families},
     factory::{Config, Factory},
     graph::{render::*, GraphBuilder, GraphContext, NodeBuffer, NodeImage},
     hal::{self, device::Device as _, window::PresentMode},
@@ -38,6 +39,7 @@ use rendy::{
             event::{Event, WindowEvent, DeviceEvent, VirtualKeyCode},
             event_loop::{ControlFlow, EventLoop},
             window::WindowBuilder,
+            dpi::PhysicalSize,
         },
     init::winit,
     init::AnyWindowedRendy,
@@ -142,6 +144,7 @@ impl<B,T> RenderGroupDesc<B,T> for BasicRenderGroupDesc
         images: Vec<NodeImage>,
     ) -> Result<Box<dyn RenderGroup<B, T>>, hal::pso::CreationError> {
 
+        //TODO: move to render group so we can bind different pipelines in a single render pass
         return Err(hal::pso::CreationError::Other);
     }
 }
@@ -399,51 +402,55 @@ fn main() {
     let rendy = AnyWindowedRendy::init_auto(&config, window_builder, &event_loop).unwrap();
     rendy::with_any_windowed_rendy!((rendy)
         (mut factory, mut families, surface, window) => {
-            let mut graph_builder = GraphBuilder::<_, Scene<Backend>>::new();
 
-            let mut size = window.inner_size().to_physical(window.hidpi_factor());
-            let window_kind = hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1);
+            let mut build_graph = |size : PhysicalSize, surface : Surface<Backend>, scene : &Scene<Backend>, factory : &mut Factory<Backend>, families : &mut Families<Backend>| {
+                let mut graph_builder = GraphBuilder::<_, Scene<Backend>>::new().with_frames_in_flight(scene.frames_in_flight);
+                let window_kind = hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1);
 
-            let depth = graph_builder.create_image(
-                window_kind,
-                1,
-                hal::format::Format::D16Unorm,
-                Some(hal::command::ClearValue{
-                    depth_stencil : hal::command::ClearDepthStencil{depth: 0.0, stencil: 0},
-                }),
-            );
-
-            graph_builder.add_node(
-                BasicRenderPipeline::builder()
-                    .into_subpass()
-                    .with_color_surface()
-                    .with_depth_stencil(depth)
-                    .into_pass()
-                    .with_surface(
-                        surface,
-                        hal::window::Extent2D {
-                            width: size.width as _,
-                            height: size.height as _,
-                        },
-                        Some(hal::command::ClearValue {
-                            color: hal::command::ClearColor {
-                                float32: [1.0, 1.0, 1.0, 1.0],
+                let depth = graph_builder.create_image(
+                    window_kind,
+                    1,
+                    hal::format::Format::D16Unorm,
+                    Some(hal::command::ClearValue{
+                        depth_stencil : hal::command::ClearDepthStencil{depth: 0.0, stencil: 0},
+                    }),
+                );
+    
+                graph_builder.add_node(
+                    BasicRenderPipeline::builder()
+                        .into_subpass()
+                        .with_color_surface()
+                        .with_depth_stencil(depth)
+                        .into_pass()
+                        .with_surface(
+                            surface,
+                            hal::window::Extent2D {
+                                width: size.width as _,
+                                height: size.height as _,
                             },
-                        }
+                            Some(hal::command::ClearValue {
+                                color: hal::command::ClearColor {
+                                    float32: [1.0, 1.0, 1.0, 1.0],
+                                },
+                            }
+                        ),
                     ),
-                ),
-            );
+                );
+
+                Some(graph_builder
+                    .build(factory, families, scene)
+                    .unwrap())
+            };
 
             let mut scene = Scene {
                 specs_world : specs_world.clone(),
                 camera_data : CameraRenderData::new(),
-                frames_in_flight : 4,
+                frames_in_flight : 3, //FIXME: (get this from somewhere else?)
                 phantom : std::marker::PhantomData,
             };
 
-            let mut graph = graph_builder
-                .build(&mut factory, &mut families, &scene)
-                .unwrap();
+            let mut size = window.inner_size().to_physical(window.hidpi_factor());
+            let mut graph = build_graph(size, surface, &scene, &mut factory, &mut families);
 
             {
                 let mut specs_world = specs_world.write().unwrap();
@@ -498,8 +505,6 @@ fn main() {
             let mut delta_time = Instant::now();
             let mut new_delta = (0., 0.);
             let mut needs_resize = false;
-
-            let mut graph = Some(graph);
 
             event_loop.run(move |event, _, control_flow| {
 
@@ -567,42 +572,7 @@ fn main() {
 
                             let new_surface = factory.create_surface(&window).expect("failed to create surface");
 
-                            let mut graph_builder = GraphBuilder::<_, Scene<Backend>>::new();
-                            let window_kind = hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1);
-
-                            let depth = graph_builder.create_image(
-                                window_kind,
-                                1,
-                                hal::format::Format::D16Unorm,
-                                Some(hal::command::ClearValue{
-                                    depth_stencil : hal::command::ClearDepthStencil{depth: 0.0, stencil: 0},
-                                }),
-                            );
-                
-                            graph_builder.add_node(
-                                BasicRenderPipeline::builder()
-                                    .into_subpass()
-                                    .with_color_surface()
-                                    .with_depth_stencil(depth)
-                                    .into_pass()
-                                    .with_surface(
-                                        new_surface,
-                                        hal::window::Extent2D {
-                                            width: size.width as _,
-                                            height: size.height as _,
-                                        },
-                                        Some(hal::command::ClearValue {
-                                            color: hal::command::ClearColor {
-                                                float32: [1.0, 1.0, 1.0, 1.0],
-                                            },
-                                        }
-                                    ),
-                                ),
-                            );
-
-                            graph = Some(graph_builder
-                                .build(&mut factory, &mut families, &scene)
-                                .unwrap());
+                            graph = build_graph(size, new_surface, &scene, &mut factory, &mut families);
 
                             needs_resize = false;
                         }
