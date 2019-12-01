@@ -14,7 +14,7 @@ impl Transform {
         Transform {
             position : glm::vec3(0.0, 0.0, 0.0),
             rotation : glm::quat(0.0, 1.0, 0.0, 0.0),
-            scale    : glm::vec3(1.0, 4.0, 1.0),
+            scale    : glm::vec3(1.0, 1.0, 1.0),
         }
     }
 }
@@ -30,6 +30,9 @@ pub struct Acceleration(pub glm::Vec3);
 
 #[derive(Debug, Component, Deref, DerefMut)]
 pub struct Drag(pub f32);
+
+#[derive(Debug, Component, Deref, DerefMut)]
+pub struct TerminalVelocity(pub f32);
 
 pub struct UpdatePositionSystem;
 
@@ -58,9 +61,10 @@ impl<'a> System<'a> for UpdateVelocitySystem {
     type SystemData = ( Read<'a, DeltaTime>, 
                         WriteStorage<'a, Velocity>, 
                         ReadStorage<'a, Acceleration>,
-                        ReadStorage<'a, Drag>);
+                        ReadStorage<'a, Drag>,
+                        ReadStorage<'a, TerminalVelocity>);
 
-    fn run(&mut self, (dt, mut vel, acc, drag): Self::SystemData) {    
+    fn run(&mut self, (dt, mut vel, acc, drag, terminal_vel): Self::SystemData) {    
         for (vel, acc) in (&mut vel, &acc).join() {
             vel.0 += acc.0 * dt.0;
         }
@@ -72,6 +76,12 @@ impl<'a> System<'a> for UpdateVelocitySystem {
             vel.x = new_abs_vel.x.copysign(vel.x);
             vel.y = new_abs_vel.y.copysign(vel.y);
             vel.z = new_abs_vel.z.copysign(vel.z);
+        }
+
+        for (vel, terminal_vel) in (&mut vel, &terminal_vel).join() {
+            if glm::length(vel) > terminal_vel.0 {
+                vel.0 = glm::normalize(vel) * terminal_vel.0;
+            }
         }
     }
 }

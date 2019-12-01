@@ -10,18 +10,6 @@ use std::{
     collections::HashMap,
 };
 
-macro_rules! map(
-    { $($key:expr => $value:expr),+ } => {
-        {
-            let mut m = ::std::collections::HashMap::new();
-            $(
-                m.insert($key, $value);
-            )+
-            m
-        }
-     };
-);
-
 #[macro_use]
 extern crate derive_deref;
 
@@ -29,7 +17,7 @@ use rendy::{
     wsi::Surface,
     command::{QueueId, RenderPassEncoder, Families},
     factory::{Config, Factory},
-    graph::{render::*, GraphBuilder, GraphContext, NodeBuffer, NodeImage},
+    graph::{render::*, GraphBuilder, GraphContext, NodeBuffer, NodeImage, DescBuilder},
     hal::{self, device::Device as _, window::PresentMode},
     memory::Dynamic,
     mesh::PosColor,
@@ -40,7 +28,7 @@ use rendy::{
             event_loop::{ControlFlow, EventLoop},
             window::WindowBuilder,
             dpi::PhysicalSize,
-        },
+    },
     init::winit,
     init::AnyWindowedRendy,
 };
@@ -63,33 +51,6 @@ pub type Backend = rendy::metal::Backend;
 
 #[cfg(feature = "vulkan")]
 pub type Backend = rendy::vulkan::Backend;
-
-lazy_static::lazy_static! {
-    static ref VERTEX: PathBufShaderInfo = PathBufShaderInfo::new(
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/shaders/basic.vert")),
-        ShaderKind::Vertex,
-        SourceLanguage::GLSL,
-        "main",
-    );  
-
-    static ref FRAGMENT: PathBufShaderInfo = PathBufShaderInfo::new(
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/shaders/basic.frag")),
-        ShaderKind::Fragment,
-        SourceLanguage::GLSL,
-        "main",
-    );
-
-    static ref SHADERS: rendy::shader::ShaderSetBuilder = rendy::shader::ShaderSetBuilder::default()
-        .with_vertex(&*VERTEX).unwrap()
-        .with_fragment(&*FRAGMENT).unwrap();
-}
-
-lazy_static::lazy_static! {
-    static ref SHADER_REFLECTION: SpirvReflection = SHADERS.reflect().unwrap();
-}
-
-static WIDTH : f64 = 1280.0;
-static HEIGHT : f64 = 720.0;
 
 //TODO: REMOVE and just extract directly from component data
 pub struct CameraRenderData {
@@ -126,171 +87,114 @@ struct UniformData {
 #[derive(Debug, Default)]
 struct BasicRenderGroupDesc;
 
-impl<B,T> RenderGroupDesc<B,T> for BasicRenderGroupDesc
+impl<B> RenderGroupDesc<B,Scene<B>> for BasicRenderGroupDesc
     where
         B: hal::Backend,
-        T: ?Sized,
 {
      fn build<'a>(
         self,
         ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         queue: QueueId,
-        aux: &T,
+        aux: &Scene<B>,
         framebuffer_width: u32,
         framebuffer_height: u32,
         subpass: hal::pass::Subpass<'_, B>,
         buffers: Vec<NodeBuffer>,
         images: Vec<NodeImage>,
-    ) -> Result<Box<dyn RenderGroup<B, T>>, hal::pso::CreationError> {
-
-        //TODO: move to render group so we can bind different pipelines in a single render pass
-        return Err(hal::pso::CreationError::Other);
-    }
-}
-
-#[derive(Debug, Default)]
-struct BasicRenderPipelineDesc;
-
-impl<B> SimpleGraphicsPipelineDesc<B, Scene<B>> for BasicRenderPipelineDesc
-where
-    B: hal::Backend,
-{
-    type Pipeline = BasicRenderPipeline<B>;
-
-    fn depth_stencil(&self) -> Option<hal::pso::DepthStencilDesc> {
-        Some(hal::pso::DepthStencilDesc {
-            depth: Some(hal::pso::DepthTest {
-                    fun: hal::pso::Comparison::GreaterEqual,
-                    write: true,
-            }),
-            depth_bounds: false,
-            stencil: None,
-        })
-    }
-
-    fn load_shader_set(
-        &self, 
-        factory: &mut Factory<B>, 
-        _scene : &Scene<B>
-    ) -> ShaderSet<B> {
-        SHADERS.build(factory, Default::default()).unwrap()
-    }
-
-    fn vertices( &self ) -> Vec<(
-        Vec<hal::pso::Element<hal::format::Format>>,
-        hal::pso::ElemStride,
-        hal::pso::VertexInputRate,
-    )> {
-        vec![SHADER_REFLECTION
-            .attributes_range(..)
-            .unwrap()
-            .gfx_vertex_input_desc(hal::pso::VertexInputRate::Vertex)]
-    }
-
-    fn layout(&self) -> Layout {
-        SHADER_REFLECTION.layout().unwrap()
-    }
-
-    fn build<'a>(
-        self,
-        ctx: &GraphContext<B>,
-        factory: &mut Factory<B>,
-        _queue: QueueId,
-        scene : &Scene<B>,
-        buffers: Vec<NodeBuffer>,
-        images: Vec<NodeImage>,
-        set_layouts: &[Handle<DescriptorSetLayout<B>>],
-    ) -> Result<BasicRenderPipeline<B>, hal::pso::CreationError> {
-        Ok(BasicRenderPipeline{
+    ) -> Result<Box<dyn RenderGroup<B, Scene<B>>>, hal::pso::CreationError> {
+        return Ok(Box::new(BasicRenderGroup {
+            framebuffer_size : (framebuffer_width, framebuffer_height),
             mesh_data : HashMap::new(),
-        })
+        }));
     }
 }
 
-static mut ROTATION : f32 = 0.0f32;
+#[derive(Debug, Default)]
+struct BasicRenderGroupMeshData<B : hal::Backend> {
+    pub pipeline : B::GraphicsPipeline,
+    pub uniform_buffers : Vec<Escape<Buffer<B>>>, // 1 per frame-in-flight
+    pub descriptor_sets : Vec<Escape<DescriptorSet<B>>>, // 1 per frame-in-flight
+}
 
 #[derive(Debug, Default)]
-struct BasicRenderPipelineMeshData<B: hal::Backend> {
-    pub descriptor_sets : Vec<Escape<DescriptorSet<B>>>, //1 per frame in flight
-    pub mvp_uniform_buffers : Vec<Escape<Buffer<B>>>, //1 per frame in flight
+struct BasicRenderGroup<B : hal::Backend> {
+    framebuffer_size : (u32, u32),
+    mesh_data : HashMap<u32, BasicRenderGroupMeshData<B>>,
 }
 
-#[derive(Debug)]
-struct BasicRenderPipeline<B: hal::Backend> {
-    mesh_data : HashMap<u32, BasicRenderPipelineMeshData<B>>,
-}
-
-impl<B> SimpleGraphicsPipeline<B, Scene<B>> for BasicRenderPipeline<B>
-where
-    B: hal::Backend,
+impl<B> BasicRenderGroup<B> 
+    where B : hal::Backend,
 {
-    type Desc = BasicRenderPipelineDesc;
+    fn builder() -> DescBuilder<B, Scene<B>, BasicRenderGroupDesc>
+    {
+        BasicRenderGroupDesc::default().builder()
+    }
+}
 
+impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
+    where B: hal::Backend,
+{   
     fn prepare(
         &mut self,
         factory: &Factory<B>,
-        _queue: QueueId,
-        set_layouts: &[Handle<DescriptorSetLayout<B>>],
+        queue: QueueId,
         index: usize,
-        scene : &Scene<B>,
+        subpass: hal::pass::Subpass<'_, B>,
+        scene: &Scene<B>,
     ) -> PrepareResult {
-        assert!(set_layouts.len() > 0);
-        
-        //TODO: destroy mesh_data for meshes that no longer exist
-
         let specs_world = scene.specs_world.read().expect("Failed to read from scene.specs_world RwLock");
         let specs_entities = specs_world.entities();
         let specs_meshes = specs_world.read_storage::<MeshComponent<B>>();
+        let specs_materials = specs_world.read_storage::<Material<B>>();
         let specs_transforms = specs_world.read_storage::<Transform>();
 
-        for (entity, mesh, transform) in (&specs_entities, &specs_meshes, &specs_transforms).join() {
+        for (entity, mesh, material, transform) in (&specs_entities, &specs_meshes, &specs_materials, &specs_transforms).join() {
             let id = entity.id();
+
+            let uniform_size = std::mem::size_of::<UniformData>() as u64;
+            let mut uniform_buffers = Vec::with_capacity(scene.frames_in_flight as usize);
+            let mut descriptor_sets = Vec::with_capacity(scene.frames_in_flight as usize);
+
+            for index in 0..scene.frames_in_flight as usize {
+                uniform_buffers.push(factory
+                    .create_buffer(
+                        BufferInfo {
+                            size: uniform_size,
+                            usage: hal::buffer::Usage::UNIFORM,
+                        },
+                        Dynamic,
+                    )
+                    .unwrap()
+                );
+
+                descriptor_sets.push( unsafe {
+                    let set = factory
+                        .create_descriptor_set(material.set_layouts[0].clone())
+                        .unwrap();
+                    factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
+                        set: set.raw(),
+                        binding: 0,
+                        array_offset: 0,
+                        descriptors: Some(hal::pso::Descriptor::Buffer(
+                            uniform_buffers[index].raw(),
+                            Some(0) .. Some(uniform_size)
+                        )),
+                    }));
+                    set
+                });     
+            }
+
             if !self.mesh_data.contains_key(&id) {
-                let uniform_size = std::mem::size_of::<UniformData>() as u64;
-
-                let mut uniform_buffers = Vec::with_capacity(scene.frames_in_flight as usize);
-                let mut sets = Vec::with_capacity(scene.frames_in_flight as usize);
-
-                for index in 0..scene.frames_in_flight as usize {
-                    uniform_buffers.push(factory
-                        .create_buffer(
-                            BufferInfo {
-                                size: uniform_size,
-                                usage: hal::buffer::Usage::UNIFORM,
-                            },
-                            Dynamic,
-                        )
-                        .unwrap()
-                    );
-
-                    sets.push( unsafe {
-                        let set = factory
-                            .create_descriptor_set(set_layouts[0].clone())
-                            .unwrap();
-                        factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
-                            set: set.raw(),
-                            binding: 0,
-                            array_offset: 0,
-                            descriptors: Some(hal::pso::Descriptor::Buffer(
-                                uniform_buffers[index].raw(),
-                                Some(0) .. Some(uniform_size)
-                            )),
-                        }));
-                        set
-                    });     
-                }
-
-                self.mesh_data.insert(id, BasicRenderPipelineMeshData {
-                    descriptor_sets : sets,
-                    mvp_uniform_buffers : uniform_buffers,
+                self.mesh_data.insert(id, BasicRenderGroupMeshData {
+                    pipeline : material.create_pipeline(subpass, factory),
+                    uniform_buffers,
+                    descriptor_sets,
                 });
             }
 
             if let Some(mut mesh_data) = self.mesh_data.get_mut(&entity.id()) {
                 unsafe {
-                    ROTATION = ROTATION + 0.01f32;
-
                     let model_matrix = {
                         let mut model_matrix = glm::identity();
                         model_matrix = glm::translate(&model_matrix, &transform.position);
@@ -300,7 +204,7 @@ where
                     };
 
                     let mut perspective_matrix = glm::perspective_zo(
-                        WIDTH as f32 / HEIGHT as f32,
+                        self.framebuffer_size.0 as f32 / self.framebuffer_size.1 as f32,
                         degrees_to_radians(60.0f32),
                         100000.0,
                         0.01
@@ -308,7 +212,7 @@ where
                     perspective_matrix[(1,1)] *= -1.0;
 
                     factory.upload_visible_buffer(
-                        &mut mesh_data.mvp_uniform_buffers[index], //access correct uni buffer
+                        &mut mesh_data.uniform_buffers[index], //access correct uni buffer
                         0, 
                         &[UniformData {
                             model_matrix :  model_matrix,
@@ -324,31 +228,46 @@ where
             }
         }
 
-        /* Alternatively, DrawReuse only records command buffers once, useful when rendered items never changes 
-            (i.e. fullscreen quad for GBuff lighting / PostProcess) */
         PrepareResult::DrawRecord
     }
 
-    fn draw(
+    fn draw_inline(
         &mut self,
-        layout: &B::PipelineLayout,
         mut encoder: RenderPassEncoder<'_, B>,
         index: usize,
-        scene : &Scene<B>,
+        _subpass: hal::pass::Subpass<'_, B>,
+        scene: &Scene<B>,
     ) {
         let specs_world = scene.specs_world.read().expect("Failed to read from scene.specs_world RwLock");
         let specs_entities = specs_world.entities();
-        let specs_mesh_storage = specs_world.read_storage::<MeshComponent<B>>();
-        for (entity, mesh) in (&specs_entities, &specs_mesh_storage).join() {
+        let specs_meshes = specs_world.read_storage::<MeshComponent<B>>();
+        let specs_materials = specs_world.read_storage::<Material<B>>();
+
+        let viewport = hal::pso::Viewport {
+			rect: hal::pso::Rect {
+				x: 0,
+				y: 0,
+				w: self.framebuffer_size.0 as i16,
+				h: self.framebuffer_size.1 as i16,
+			},
+			depth: 0.0..1.0,
+		};
+        
+        unsafe {
+            encoder.set_viewports(0, &[viewport.clone()]);
+            encoder.set_scissors(0, &[viewport.rect]);
+        }
+
+        for (entity, mesh, material) in (&specs_entities, &specs_meshes, &specs_materials).join() {
             if let Some(mesh_data) = self.mesh_data.get(&entity.id()) {
+                encoder.bind_graphics_pipeline(&mesh_data.pipeline);
                 unsafe {
                     encoder.bind_graphics_descriptor_sets(
-                        layout,
+                        &material.pipeline_layout,
                         0,
                         Some(mesh_data.descriptor_sets[index].raw()),
                         std::iter::empty(),
                     );
-
                     encoder.bind_vertex_buffers(0, Some((mesh.vertex_buffer.raw(), 0)));
                     encoder.bind_index_buffer(mesh.index_buffer.raw(), 0, hal::IndexType::U32);
                     encoder.draw_indexed(0..mesh.num_indices, 0, 0..1);
@@ -357,7 +276,9 @@ where
         }
     }
 
-    fn dispose(self, _factory: &mut Factory<B>, _scene : &Scene<B>) {}
+    fn dispose(self: Box<Self>, factory: &mut Factory<B>, scene: &Scene<B>) {
+        //TODO:
+    }
 }
 
 mod specs_systems;
@@ -404,6 +325,8 @@ fn main() {
         (mut factory, mut families, surface, window) => {
 
             let mut build_graph = |size : PhysicalSize, surface : Surface<Backend>, scene : &Scene<Backend>, factory : &mut Factory<Backend>, families : &mut Families<Backend>| {
+                
+                //TODO: get frames in flight from surface?
                 let mut graph_builder = GraphBuilder::<_, Scene<Backend>>::new().with_frames_in_flight(scene.frames_in_flight);
                 let window_kind = hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1);
 
@@ -417,7 +340,7 @@ fn main() {
                 );
     
                 graph_builder.add_node(
-                    BasicRenderPipeline::builder()
+                    BasicRenderGroup::builder()
                         .into_subpass()
                         .with_color_surface()
                         .with_depth_stencil(depth)
@@ -461,14 +384,26 @@ fn main() {
                 specs_world.create_entity().with(Velocity(glm::vec3(200.0, 100.0, 300.0))).with(Transform::new()).build();
 
                 specs_world.register::<MeshComponent<Backend>>(); //FIXME: can remove this once a system using MeshComponent is hooked up to world
-                specs_world.create_entity().with(Transform::new()).with(MeshComponent::new(&mut factory)).build();
+                specs_world.register::<Material<Backend>>(); //FIXME: can remove this once a system using Material is hooked up to world
                 
                 specs_world.create_entity()
-                    .with(MeshComponent::new(&mut factory))
                     .with(Transform::new())
-                    .with(Velocity(glm::vec3(0.5, 0.0, 0.0)))
-                    .with(AngularVelocity(glm::quat(0.0, 1.0, 1.0, 0.3)))
+                    .with(MeshComponent::new("data/models/Cube.glb", &mut factory))
+                    .with(Material::new("/data/shaders/basic.vert", "/data/shaders/basic.frag", &mut factory))
                     .build();
+                
+                for i in 0..10 {
+                    let mut transform = Transform::new();
+                    transform.position.x = 2.0 * i as f32;
+
+                    specs_world.create_entity()
+                        .with(MeshComponent::new("data/models/Monkey.glb", &mut factory))
+                        .with(Material::new("/data/shaders/basic.vert", "/data/shaders/basic_2.frag", &mut factory))
+                        .with(transform)
+                        .with(Velocity(glm::vec3(0.5, 0.0, 0.0)))
+                        .with(AngularVelocity(glm::quat(0.0, 1.0, 1.0, 0.3)))
+                        .build();
+                }
                 
                 //Camera
                 specs_world.create_entity()
@@ -476,6 +411,7 @@ fn main() {
                     .with(Velocity(glm::vec3(0.0, 0.0, 0.0)))
                     .with(Acceleration(glm::vec3(0.0, 0.0, 0.0)))
                     .with(Drag(10.0))
+                    .with(TerminalVelocity(100.0))
                     .with(InputComponent { move_speed : 20.0 })
                     .with(ActiveCamera)
                     .build();
@@ -619,6 +555,4 @@ where T: num::Float {
     deg * num::cast(0.0174533).unwrap()
 }
 
-// TODO: 1. Crate to convert GLTF Animation data to a fast-readable format (bake matrices at each bone)
-// TODO: 2. Create a RenderComponent
-// TODO: 3. Render System at end that renders output
+// TODO: Create to convert GLTF Animation data to a fast-readable format (bake matrices at each bone)
