@@ -20,9 +20,7 @@ use rendy::{
     graph::{render::*, GraphBuilder, GraphContext, NodeBuffer, NodeImage, DescBuilder},
     hal::{self, device::Device as _, window::PresentMode},
     memory::Dynamic,
-    mesh::PosColor,
     resource::{Buffer, BufferInfo, DescriptorSet, DescriptorSetLayout, Escape, Handle},
-    shader::{ShaderKind, SourceLanguage, PathBufShaderInfo, ShaderSet, SpirvReflection},
     init::winit::{
             event::{Event, WindowEvent, DeviceEvent, VirtualKeyCode},
             event_loop::{ControlFlow, EventLoop},
@@ -114,6 +112,7 @@ impl<B> RenderGroupDesc<B,Scene<B>> for BasicRenderGroupDesc
 struct BasicRenderGroupMeshData<B : hal::Backend> {
     pub pipeline : B::GraphicsPipeline,
     pub uniform_buffers : Vec<Escape<Buffer<B>>>, // 1 per frame-in-flight
+    pub skeleton_buffers : Vec<Escape<Buffer<B>>>,
     pub descriptor_sets : Vec<Escape<DescriptorSet<B>>>, // 1 per frame-in-flight
 }
 
@@ -154,6 +153,11 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
 
             let uniform_size = std::mem::size_of::<UniformData>() as u64;
             let mut uniform_buffers = Vec::with_capacity(scene.frames_in_flight as usize);
+
+            //TODO: support non-skinned meshes
+            let skeleton_size = mesh.gltf_model.skeletons[0].bones.len() as u64 * std::mem::size_of::<GpuBone>() as u64;
+            let mut skeleton_buffers = Vec::with_capacity(scene.frames_in_flight as usize);
+
             let mut descriptor_sets = Vec::with_capacity(scene.frames_in_flight as usize);
 
             for index in 0..scene.frames_in_flight as usize {
@@ -161,6 +165,17 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                     .create_buffer(
                         BufferInfo {
                             size: uniform_size,
+                            usage: hal::buffer::Usage::UNIFORM,
+                        },
+                        Dynamic,
+                    )
+                    .unwrap()
+                );
+
+                skeleton_buffers.push(factory
+                    .create_buffer(
+                        BufferInfo {
+                            size: skeleton_size,
                             usage: hal::buffer::Usage::UNIFORM,
                         },
                         Dynamic,
@@ -181,6 +196,15 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                             Some(0) .. Some(uniform_size)
                         )),
                     }));
+                    factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
+                        set: set.raw(),
+                        binding: 1,
+                        array_offset: 0,
+                        descriptors: Some(hal::pso::Descriptor::Buffer(
+                            skeleton_buffers[index].raw(),
+                            Some(0) .. Some(skeleton_size)
+                        )),
+                    }));
                     set
                 });     
             }
@@ -189,6 +213,7 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                 self.mesh_data.insert(id, BasicRenderGroupMeshData {
                     pipeline : material.create_pipeline(subpass, factory),
                     uniform_buffers,
+                    skeleton_buffers,
                     descriptor_sets,
                 });
             }
@@ -223,6 +248,12 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                                             ),
                             proj_matrix  :  perspective_matrix.into(),
                         }]
+                    ).unwrap();
+
+                    factory.upload_visible_buffer(
+                        &mut mesh_data.skeleton_buffers[index], //access correct uni buffer
+                        0,
+                        &mesh.gltf_model.skeletons[0].bones,
                     ).unwrap();
                 }
             }
@@ -298,6 +329,10 @@ fn main() {
     //Specs setup
     let specs_world = Arc::new(RwLock::new(World::new()));
 
+    let anim_system = AnimationSystem::<Backend> {
+        phantom : std::marker::PhantomData::<Backend>,
+    };
+
     let specs_dispatcher = {
         let mut dispatcher = DispatcherBuilder::new()
             .with(InputMovementSystem, "input_movement_system", &[])
@@ -305,6 +340,7 @@ fn main() {
             .with(UpdatePositionSystem, "update_position_system", &["input_movement_system", "acceleration_system"])
             .with(UpdateRotationSystem, "update_rotation_system", &["input_movement_system"])
             .with(UpdateCameraSystem, "update_camera_system", &["input_movement_system"])
+            .with(anim_system, "animation_system", &["input_movement_system"])
         .build();
         //NOTE: has to be done before creating entities in world (seems problematic)
         dispatcher.setup(&mut specs_world.write().unwrap());
@@ -386,22 +422,24 @@ fn main() {
                 specs_world.register::<MeshComponent<Backend>>(); //FIXME: can remove this once a system using MeshComponent is hooked up to world
                 specs_world.register::<Material<Backend>>(); //FIXME: can remove this once a system using Material is hooked up to world
                 
-                specs_world.create_entity()
-                    .with(Transform::new())
-                    .with(MeshComponent::new("data/models/Cube.glb", &mut factory))
-                    .with(Material::new("/data/shaders/basic.vert", "/data/shaders/basic.frag", &mut factory))
-                    .build();
+                //FIXME: support unskinned
+                // specs_world.create_entity()
+                //     .with(Transform::new())
+                //     .with(MeshComponent::new("data/models/Cube.glb", &mut factory))
+                //     .with(Material::new("/data/shaders/basic.vert", "/data/shaders/basic.frag", &mut factory))
+                //     .build();
                 
-                for i in 0..10 {
+                for i in 0..1 {
                     let mut transform = Transform::new();
                     transform.position.x = 2.0 * i as f32;
 
                     specs_world.create_entity()
-                        .with(MeshComponent::new("data/models/Monkey.glb", &mut factory))
-                        .with(Material::new("/data/shaders/basic.vert", "/data/shaders/basic_2.frag", &mut factory))
+                        .with(MeshComponent::new("data/models/Running.glb", &mut factory))
+                        .with(AnimComponent::new(0.1))
+                        .with(Material::new("/data/shaders/skinned.vert", "/data/shaders/basic_2.frag", &mut factory))
                         .with(transform)
-                        .with(Velocity(glm::vec3(0.5, 0.0, 0.0)))
-                        .with(AngularVelocity(glm::quat(0.0, 1.0, 1.0, 0.3)))
+                        .with(Velocity(glm::vec3(0.05, 0.0, 0.0)))
+                        //.with(AngularVelocity(glm::quat(0.0, 1.0, 1.0, 0.03))) //FIXME: lower quat values not slowing down rotation, why?
                         .build();
                 }
                 

@@ -5,7 +5,6 @@ use rendy::{
     hal::{device::Device},
     factory::{Config, Factory},
     memory::Dynamic,
-    mesh::PosColor,
     resource::{Escape, Buffer, BufferInfo, DescriptorSetLayout, Handle},
     shader::{ShaderKind, SourceLanguage, PathBufShaderInfo, ShaderSet, SpirvReflection},
 };
@@ -13,6 +12,7 @@ use rendy::{
 use std::path::PathBuf;
 
 use crate::gltf_loader::*;
+use crate::DeltaTime;
 
 #[derive(Component)]
 pub struct MeshComponent<B: hal::Backend> {
@@ -25,13 +25,10 @@ pub struct MeshComponent<B: hal::Backend> {
 impl<B> MeshComponent<B> where B: hal::Backend {
     pub fn new(mesh_path : &str, factory: &mut Factory<B>) -> MeshComponent<B> {
         let gltf_model = GltfModel::new(mesh_path);
-        let vertices : Vec<PosColor> = gltf_model.meshes[0].vertices.iter().map(|v| PosColor {
-            position : v.a_pos.into(),
-            color    : [1.0, 0.0, 0.0, 1.0].into(),
-        }).collect();
+        let vertices = &gltf_model.meshes[0].vertices;
         let indices = &gltf_model.meshes[0].indices.as_ref().unwrap();
 
-        let vbuf_size = std::mem::size_of::<PosColor>() as u64 * vertices.len() as u64;
+        let vbuf_size = std::mem::size_of::<Vertex>() as u64 * vertices.len() as u64;
 
         let mut vbuf = factory
             .create_buffer(
@@ -225,4 +222,40 @@ impl<B> Material<B> where B : hal::Backend {
             ).expect("failed to create graphics pipeline")
         }
     }
+}
+#[derive(Default, Component)]
+pub struct AnimComponent
+{
+    pub speed : f32,
+}
+
+impl AnimComponent {
+    pub fn new(speed : f32) -> AnimComponent {
+        AnimComponent {
+            speed,
+        }
+    }
+}
+
+//TODO: new fn that takes B as arg?
+pub struct AnimationSystem<B : hal::Backend>
+{
+    pub phantom : std::marker::PhantomData<B>,
+}
+
+impl<'a, B> System<'a> for AnimationSystem<B>
+    where B : hal::Backend 
+    {
+
+    type SystemData = ( Read<'a, DeltaTime>,
+                        WriteStorage<'a, MeshComponent<B>>,
+                        ReadStorage<'a, AnimComponent>,
+                      );
+
+     fn run(&mut self, (dt, mut meshes, animations): Self::SystemData) {
+         for (mesh, anim) in (&mut meshes, &animations).join() {
+            //TODO: skeleton index, anim index
+            mesh.gltf_model.animate(0, 0, (anim.speed * dt.0) as f64);
+         }
+     }
 }
