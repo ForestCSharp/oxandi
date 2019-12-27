@@ -237,7 +237,6 @@ impl AnimComponent {
     }
 }
 
-//TODO: new fn that takes B as arg?
 pub struct AnimationSystem<B : hal::Backend>
 {
     pub phantom : std::marker::PhantomData<B>,

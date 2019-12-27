@@ -454,27 +454,6 @@ impl Mesh {
         }
     }
 
-	// pub fn record_draw_commands( &self, encoder : &mut hal::command::RenderPassInlineEncoder<B>, instance_count : u32)
-	// {
-	// 	unsafe {
-	// 		encoder.bind_vertex_buffers(0, Some((&self.vertex_buffer.buffer, 0)));
-
-	// 		match &self.index_buffer {
-	// 			Some(index_buffer) => {
-	// 				encoder.bind_index_buffer(hal::buffer::IndexBufferView {
-	// 					buffer: &index_buffer.buffer,
-	// 					offset: 0,
-	// 					index_type: hal::IndexType::U32,
-	// 				});
-	// 				encoder.draw_indexed(0..index_buffer.count, 0, 0..instance_count);
-	// 			},
-	// 			None => {
-	// 				encoder.draw(0..self.vertex_buffer.count, 0..instance_count);
-	// 			}
-	// 		}
-	// 	}
-	// }
-
     pub fn destroy(self) {
         
     }

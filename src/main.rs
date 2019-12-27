@@ -154,9 +154,12 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
             let uniform_size = std::mem::size_of::<UniformData>() as u64;
             let mut uniform_buffers = Vec::with_capacity(scene.frames_in_flight as usize);
 
-            //TODO: support non-skinned meshes
-            let skeleton_size = mesh.gltf_model.skeletons[0].bones.len() as u64 * std::mem::size_of::<GpuBone>() as u64;
-            let mut skeleton_buffers = Vec::with_capacity(scene.frames_in_flight as usize);
+            let skeleton_size = match mesh.gltf_model.skeletons.get(0) {
+                    Some(skeleton) => Some(skeleton.bones.len() as u64 * std::mem::size_of::<GpuBone>() as u64),
+                    None => None,
+            };
+
+            let mut skeleton_buffers = Vec::new();
 
             let mut descriptor_sets = Vec::with_capacity(scene.frames_in_flight as usize);
 
@@ -172,16 +175,18 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                     .unwrap()
                 );
 
-                skeleton_buffers.push(factory
-                    .create_buffer(
-                        BufferInfo {
-                            size: skeleton_size,
-                            usage: hal::buffer::Usage::UNIFORM,
-                        },
-                        Dynamic,
-                    )
-                    .unwrap()
-                );
+                if let Some(skeleton_size) = skeleton_size {
+                    skeleton_buffers.push(factory
+                        .create_buffer(
+                            BufferInfo {
+                                size: skeleton_size,
+                                usage: hal::buffer::Usage::UNIFORM,
+                            },
+                            Dynamic,
+                        )
+                        .unwrap()
+                    );
+                }
 
                 descriptor_sets.push( unsafe {
                     let set = factory
@@ -196,15 +201,17 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                             Some(0) .. Some(uniform_size)
                         )),
                     }));
-                    factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
-                        set: set.raw(),
-                        binding: 1,
-                        array_offset: 0,
-                        descriptors: Some(hal::pso::Descriptor::Buffer(
-                            skeleton_buffers[index].raw(),
-                            Some(0) .. Some(skeleton_size)
-                        )),
-                    }));
+                    if let Some(skeleton_size) = skeleton_size {
+                        factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
+                            set: set.raw(),
+                            binding: 1,
+                            array_offset: 0,
+                            descriptors: Some(hal::pso::Descriptor::Buffer(
+                                skeleton_buffers[index].raw(),
+                                Some(0) .. Some(skeleton_size)
+                            )),
+                        }));
+                    }
                     set
                 });     
             }
@@ -250,11 +257,13 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                         }]
                     ).unwrap();
 
-                    factory.upload_visible_buffer(
-                        &mut mesh_data.skeleton_buffers[index], //access correct uni buffer
-                        0,
-                        &mesh.gltf_model.skeletons[0].bones,
-                    ).unwrap();
+                    if let Some(skeleton_buffer) = mesh_data.skeleton_buffers.get(index) {
+                        factory.upload_visible_buffer(
+                            &mut mesh_data.skeleton_buffers[index], //access correct uni buffer
+                            0,
+                            &mesh.gltf_model.skeletons[0].bones,
+                        ).unwrap();
+                    }
                 }
             }
         }
@@ -422,12 +431,11 @@ fn main() {
                 specs_world.register::<MeshComponent<Backend>>(); //FIXME: can remove this once a system using MeshComponent is hooked up to world
                 specs_world.register::<Material<Backend>>(); //FIXME: can remove this once a system using Material is hooked up to world
                 
-                //FIXME: support unskinned
-                // specs_world.create_entity()
-                //     .with(Transform::new())
-                //     .with(MeshComponent::new("data/models/Cube.glb", &mut factory))
-                //     .with(Material::new("/data/shaders/basic.vert", "/data/shaders/basic.frag", &mut factory))
-                //     .build();
+                specs_world.create_entity()
+                    .with(Transform::new())
+                    .with(MeshComponent::new("data/models/Cube.glb", &mut factory))
+                    .with(Material::new("/data/shaders/basic.vert", "/data/shaders/basic.frag", &mut factory))
+                    .build();
                 
                 for i in 0..1 {
                     let mut transform = Transform::new();
