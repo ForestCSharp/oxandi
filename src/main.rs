@@ -369,7 +369,7 @@ fn main() {
                 let depth = graph_builder.create_image(
                     window_kind,
                     1,
-                    hal::format::Format::D16Unorm,
+                    hal::format::Format::D32Sfloat,
                     Some(hal::command::ClearValue{
                         depth_stencil : hal::command::ClearDepthStencil{depth: 0.0, stencil: 0},
                     }),
@@ -432,10 +432,11 @@ fn main() {
                 for i in 0..1 {
                     let mut transform = Transform::new();
                     transform.position.x = 2.0 * i as f32;
+                    transform.rotation = glm::quat(1.0, 0.0, 0.0, degrees_to_radians(-90.0));
 
                     specs_world.create_entity()
                         .with(MeshComponent::new("data/models/Running.glb", &mut factory))
-                        .with(AnimComponent::new(0.1))
+                        .with(AnimComponent::new(0.5))
                         .with(Material::new("/data/shaders/skinned.vert", "/data/shaders/basic_2.frag", &mut factory))
                         .with(transform)
                         .with(Velocity(glm::vec3(0.05, 0.0, 0.0)))
