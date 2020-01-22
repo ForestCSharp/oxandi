@@ -13,6 +13,18 @@ layout(binding = 1) uniform SkeletonUniform {
     mat4 bones[MAX_BONE_COUNT];
 } skeleton;
 
+struct Light {
+    vec3 color;
+    float strength;
+    float radius;
+};
+
+#define MAX_LIGHTS 10
+
+layout(binding = 2) uniform LightUniform {
+    Light point_lights[MAX_LIGHTS];
+} lights;
+
 layout(location = 0) in vec3 in_pos;
 layout(location = 1) in vec4 in_col;
 layout(location = 2) in vec2 in_uv;
@@ -25,7 +37,9 @@ layout(location = 1) out vec3 frag_pos;
 
 void main() {
 
-    mat4 skinMatrix = mat4(0.0);
+    float t = lights.point_lights[0].radius;
+
+    mat4 skinMatrix = mat4(0.0) * t;
 
     for (int i=0; i<4; ++i)
     {

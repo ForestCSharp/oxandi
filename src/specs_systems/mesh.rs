@@ -115,7 +115,7 @@ impl<B> Material<B> where B : hal::Backend {
             .with_vertex(&vertex_shader).unwrap()
             .with_fragment(&fragment_shader).unwrap();
 
-        let shader_reflection = shader_set_builder.reflect().unwrap();
+        let shader_reflection = shader_set_builder.reflect().map_err(|e| println!("{}", e)).unwrap();
 
         let shader_set = shader_set_builder.build(factory, Default::default()).unwrap();
 

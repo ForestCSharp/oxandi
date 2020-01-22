@@ -3,6 +3,18 @@
 
 layout(early_fragment_tests) in;
 
+struct Light {
+    vec3 color;
+    float strength;
+    float radius;
+};
+
+#define MAX_LIGHTS 10
+
+layout(binding = 2) uniform LightUniform {
+    Light point_lights[MAX_LIGHTS];
+} lights;
+
 layout(location = 0) in vec4 frag_color;
 layout(location = 1) in vec3 frag_pos;
 layout(location = 0) out vec4 color;

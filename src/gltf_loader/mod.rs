@@ -138,7 +138,7 @@ impl GltfModel {
 				None => "N/A".to_string(),
 			};
 
-			println!("INDEX: {},\tPARENT: {},\tCHILDREN {:?}", node.index(), parent_index , nodes[nodes.len() - 1].children);
+			//println!("INDEX: {},\tPARENT: {},\tCHILDREN {:?}", node.index(), parent_index , nodes[nodes.len() - 1].children);
 		}
 
 		let mut meshes = Vec::new();

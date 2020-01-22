@@ -10,6 +10,9 @@ use std::{
     collections::HashMap,
 };
 
+mod specs_systems;
+use specs_systems::{common::*, spatial::*, mesh::*, light::*};
+
 #[macro_use]
 extern crate derive_deref;
 
@@ -22,10 +25,10 @@ use rendy::{
     memory::Dynamic,
     resource::{Buffer, BufferInfo, DescriptorSet, DescriptorSetLayout, Escape, Handle},
     init::winit::{
-            event::{Event, WindowEvent, DeviceEvent, VirtualKeyCode},
-            event_loop::{ControlFlow, EventLoop},
-            window::WindowBuilder,
-            dpi::PhysicalSize,
+        event::{Event, WindowEvent, DeviceEvent, VirtualKeyCode},
+        event_loop::{ControlFlow, EventLoop},
+        window::WindowBuilder,
+        dpi::PhysicalSize,
     },
     init::winit,
     init::AnyWindowedRendy,
@@ -113,6 +116,7 @@ struct BasicRenderGroupMeshData<B : hal::Backend> {
     pub pipeline : B::GraphicsPipeline,
     pub uniform_buffers : Vec<Escape<Buffer<B>>>, // 1 per frame-in-flight
     pub skeleton_buffers : Vec<Escape<Buffer<B>>>,
+    pub light_buffers : Vec<Escape<Buffer<B>>>,
     pub descriptor_sets : Vec<Escape<DescriptorSet<B>>>, // 1 per frame-in-flight
 }
 
@@ -147,6 +151,31 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
         let specs_meshes = specs_world.read_storage::<MeshComponent<B>>();
         let specs_materials = specs_world.read_storage::<Material<B>>();
         let specs_transforms = specs_world.read_storage::<Transform>();
+        let specs_lights = specs_world.read_storage::<Light>();
+
+        const MAX_LIGHTS : usize = 10;
+        
+        #[repr(C, align(16))]
+        struct LightArray {
+            lights : [Light; MAX_LIGHTS],
+        }
+
+        let mut light_array = LightArray {
+            lights : [Light::new(); MAX_LIGHTS]
+        };
+
+        //TODO: LightComponent uniform update
+        let mut i = 0;
+        for (transform,light) in (&specs_transforms, &specs_lights).join() {
+
+             //just add first 10 lights we find for now FIXME:
+            if i < MAX_LIGHTS {
+                light_array.lights[i] = *light;
+                i += 1;
+            } else {
+                break;
+            }
+        }
 
         for (entity, mesh, material, transform) in (&specs_entities, &specs_meshes, &specs_materials, &specs_transforms).join() {
             let id = entity.id();
@@ -160,6 +189,9 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
             };
 
             let mut skeleton_buffers = Vec::new();
+
+            let mut light_buffers = Vec::new();
+            let light_array_size = std::mem::size_of::<LightArray>() as u64;
 
             let mut descriptor_sets = Vec::with_capacity(scene.frames_in_flight as usize);
 
@@ -188,6 +220,17 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                     );
                 }
 
+                light_buffers.push(factory
+                    .create_buffer(
+                        BufferInfo {
+                            size: light_array_size,
+                            usage: hal::buffer::Usage::UNIFORM,
+                        },
+                        Dynamic,
+                    )
+                    .unwrap()
+                );
+
                 descriptor_sets.push( unsafe {
                     let set = factory
                         .create_descriptor_set(material.set_layouts[0].clone())
@@ -212,6 +255,15 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                             )),
                         }));
                     }
+                    factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
+                        set: set.raw(),
+                        binding: 2,
+                        array_offset: 0,
+                        descriptors: Some(hal::pso::Descriptor::Buffer(
+                            light_buffers[index].raw(), //FIXME:
+                            Some(0) .. Some(light_array_size),
+                        )),
+                    }));
                     set
                 });     
             }
@@ -221,6 +273,7 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                     pipeline : material.create_pipeline(subpass, factory),
                     uniform_buffers,
                     skeleton_buffers,
+                    light_buffers,
                     descriptor_sets,
                 });
             }
@@ -320,9 +373,6 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
         //TODO:
     }
 }
-
-mod specs_systems;
-use specs_systems::{common::*, spatial::*, mesh::*};
 
 mod gltf_loader;
 use gltf_loader::*;
@@ -428,14 +478,17 @@ fn main() {
                 specs_world.create_entity().with(Velocity(glm::vec3(2.0, 1.0, 3.0))).with(Transform::new()).build();
                 specs_world.create_entity().with(Velocity(glm::vec3(200.0, 100.0, 300.0))).with(Transform::new()).build();
 
-                specs_world.register::<MeshComponent<Backend>>(); //FIXME: can remove this once a system using MeshComponent is hooked up to world
-                specs_world.register::<Material<Backend>>(); //FIXME: can remove this once a system using Material is hooked up to world
-                
-                specs_world.create_entity()
-                    .with(Transform::new())
-                    .with(MeshComponent::new("data/models/Cube.glb", &mut factory))
-                    .with(Material::new("/data/shaders/basic.vert", "/data/shaders/basic.frag", &mut factory))
-                    .build();
+                //FIXME: can remove this once a system using them is hooked up to world
+                specs_world.register::<MeshComponent<Backend>>();
+                specs_world.register::<Material<Backend>>(); 
+                specs_world.register::<Light>();
+                // End FIXME
+
+                // specs_world.create_entity()
+                //     .with(Transform::new())
+                //     .with(MeshComponent::new("data/models/Cube.glb", &mut factory))
+                //     .with(Material::new("/data/shaders/basic.vert", "/data/shaders/basic.frag", &mut factory))
+                //     .build();
                 
                 for i in 0..1 {
                     let mut transform = Transform::new();
