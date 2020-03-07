@@ -4,8 +4,9 @@
 layout(early_fragment_tests) in;
 
 struct Light {
-    vec3 color;
+    vec3 position;
     float strength;
+    vec3 color;
     float radius;
 };
 
@@ -21,12 +22,12 @@ layout(location = 0) out vec4 color;
 
 void main() {
 
-    vec3 point_light_location = vec3(2, 2, 2);
-    float point_light_radius =lights.point_lights[0].radius;
-
-    float distance_to_light = length(point_light_location - frag_pos);
-    float att = clamp(1.0 - distance_to_light/point_light_radius, 0.0, 1.0);
+    //FIXME: iterate over all point lights, use their color to affect mesh's color
+    vec4 accumulated_color = vec4(0.0);
+    
+    float distance_to_light = length(lights.point_lights[0].position - frag_pos);
+    float att = clamp(1.0 - distance_to_light/lights.point_lights[0].radius, 0.0, 1.0);
     att *= att;
 
-    color = vec4(vec3(0.0, 1.0, 0.0) * att, 1.0);
+    color = vec4(vec3(0.0, 1.0, 0.0) * att * lights.point_lights[0].strength, 1.0);
 }

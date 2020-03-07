@@ -171,6 +171,8 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
              //just add first 10 lights we find for now FIXME:
             if i < MAX_LIGHTS {
                 light_array.lights[i] = *light;
+                light_array.lights[i].position = transform.position;
+                println!("light index: {}", i);
                 i += 1;
             } else {
                 break;
@@ -260,7 +262,7 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                         binding: 2,
                         array_offset: 0,
                         descriptors: Some(hal::pso::Descriptor::Buffer(
-                            light_buffers[index].raw(), //FIXME:
+                            light_buffers[index].raw(),
                             Some(0) .. Some(light_array_size),
                         )),
                     }));
@@ -308,6 +310,12 @@ impl<B> RenderGroup<B, Scene<B>> for BasicRenderGroup<B>
                                             ),
                             proj_matrix  :  perspective_matrix.into(),
                         }]
+                    ).unwrap();
+
+                    factory.upload_visible_buffer(
+                        &mut mesh_data.light_buffers[index], //access correct light buffer
+                        0, 
+                        &light_array.lights
                     ).unwrap();
 
                     if let Some(skeleton_buffer) = mesh_data.skeleton_buffers.get(index) {
@@ -520,6 +528,13 @@ fn main() {
                     .with(Velocity(glm::vec3(2.0, 1.0, 3.0)))
                     .with(Transform::new())
                     .with(Acceleration(glm::vec3(2.0, 1.0, 2.0)))
+                    .build();
+
+                specs_world.create_entity()
+                    //.with(Velocity(glm::vec3(2.0, 1.0, 3.0)))
+                    .with(Transform::new())
+                    .with(Light::new())
+                    //.with(Acceleration(glm::vec3(2.0, 1.0, 2.0)))
                     .build();
 
                 specs_world.create_entity().with(Transform::new()).build();
